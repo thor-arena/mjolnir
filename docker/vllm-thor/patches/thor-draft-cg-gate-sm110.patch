@@ -1,0 +1,156 @@
+diff --git a/vllm/v1/worker/gpu/spec_decode/dflash/speculator.py b/vllm/v1/worker/gpu/spec_decode/dflash/speculator.py
+--- a/vllm/v1/worker/gpu/spec_decode/dflash/speculator.py
++++ b/vllm/v1/worker/gpu/spec_decode/dflash/speculator.py
+@@ -1,6 +1,7 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ import copy
++import os
+ from typing import Any
+ 
+ import torch
+@@ -31,6 +32,122 @@
+ 
+ logger = init_logger(__name__)
+ 
++# --- THOR draft-CG gate (sm_110) lazy/one-shot state --------------------------
++# The c1 regression (study: cudagraph-c1-fix-study.md) shows that replaying
++# the DSpark draft's FULL CUDA graph is 7-16% slower than running the draft
++# eagerly at small per-step draft batches (N=1) on sm_110. The gate below
++# routes those steps through the *existing* eager fallback; capture is
++# untouched and non-sm_110 behavior is a structural no-op.
++_THOR_DRAFT_CG_MIN_BATCH: int | None = None
++_THOR_DRAFT_CG_CAPABILITY: tuple[int, int] | None = None
++_THOR_DRAFT_CG_STATE_LOGGED = False
++_THOR_DRAFT_CG_EAGER_LOGGED = False
++_THOR_DRAFT_CG_CG_LOGGED = False
++_THOR_DRAFT_CG_ERROR_LOGGED = False
++
++
++def _thor_draft_cg_use_cuda_graph(
++    num_reqs: int, capability: tuple[int, int], min_batch: int
++) -> bool:
++    """THOR_DRAFT_CG_GATE decision — pure, no CUDA/torch state.
++
++    True when this draft step should replay the captured FULL CUDA graph,
++    False when it should run through the existing eager fallback. Rules:
++    - ``capability[0] != 11`` (not sm_110) -> True: the gate is a pure
++      no-op off Thor, so non-Thor behavior never changes;
++    - on sm_110: True iff ``num_reqs >= min_batch``.
++    """
++    if capability[0] != 11:
++        return True
++    return num_reqs >= min_batch
++
++
++def _thor_draft_cg_min_batch() -> int:
++    """Parse ``VLLM_THOR_DRAFT_CG_MIN_BATCH`` lazily once.
++
++    Int, default 2, minimum 1 (1 = CG for every batch size, i.e. today's
++    behavior, useful for A/B). Invalid values fall back to 2 with a
++    one-time warning.
++    """
++    global _THOR_DRAFT_CG_MIN_BATCH
++    if _THOR_DRAFT_CG_MIN_BATCH is None:
++        value = 2
++        raw = os.environ.get("VLLM_THOR_DRAFT_CG_MIN_BATCH")
++        if raw is not None:
++            try:
++                parsed = int(raw)
++                if parsed < 1:
++                    raise ValueError("min batch must be >= 1")
++                value = parsed
++            except ValueError:
++                logger.warning(
++                    "THOR draft-CG gate: invalid VLLM_THOR_DRAFT_CG_MIN_BATCH %r, "
++                    "defaulting to 2",
++                    raw,
++                )
++        _THOR_DRAFT_CG_MIN_BATCH = value
++    return _THOR_DRAFT_CG_MIN_BATCH
++
++
++def _thor_draft_cg_capability() -> tuple[int, int]:
++    """The current device capability, read once."""
++    global _THOR_DRAFT_CG_CAPABILITY
++    if _THOR_DRAFT_CG_CAPABILITY is None:
++        _THOR_DRAFT_CG_CAPABILITY = torch.cuda.get_device_capability()
++    return _THOR_DRAFT_CG_CAPABILITY
++
++
++def _thor_draft_cg_gate_wants_eager(num_reqs: int) -> bool:
++    """THOR_DRAFT_CG_GATE: True when this step must skip the FULL-graph replay.
++
++    sm_110 only: below ``VLLM_THOR_DRAFT_CG_MIN_BATCH`` requests, the
++    existing eager fallback is faster than the replayed graph (the c1
++    regression). Off sm_110 the helper is a pure no-op. Any evaluation
++    error degrades to the CG behavior (logged once) so the gate can never
++    break serving.
++    """
++    global _THOR_DRAFT_CG_STATE_LOGGED
++    global _THOR_DRAFT_CG_EAGER_LOGGED
++    global _THOR_DRAFT_CG_CG_LOGGED
++    global _THOR_DRAFT_CG_ERROR_LOGGED
++    if _THOR_DRAFT_CG_ERROR_LOGGED:
++        return False
++    try:
++        capability = _thor_draft_cg_capability()
++        min_batch = _thor_draft_cg_min_batch()
++        if not _THOR_DRAFT_CG_STATE_LOGGED:
++            _THOR_DRAFT_CG_STATE_LOGGED = True
++            if capability[0] == 11:
++                logger.info(
++                    "THOR draft-CG gate: active (sm_110, min_batch=%d)", min_batch
++                )
++            else:
++                logger.info(
++                    "THOR draft-CG gate: inactive (arch %d.%d)",
++                    capability[0],
++                    capability[1],
++                )
++    except Exception as exc:  # never break serving
++        _THOR_DRAFT_CG_ERROR_LOGGED = True
++        logger.info(
++            "THOR draft-CG gate: error -> defaulting to cudagraph (%s)", exc
++        )
++        return False
++    use_cg = _thor_draft_cg_use_cuda_graph(num_reqs, capability, min_batch)
++    if not use_cg:
++        if not _THOR_DRAFT_CG_EAGER_LOGGED:
++            _THOR_DRAFT_CG_EAGER_LOGGED = True
++            logger.info(
++                "THOR draft-CG gate: N=%d -> eager (%d < min_batch)",
++                num_reqs,
++                num_reqs,
++            )
++        return True
++    if not _THOR_DRAFT_CG_CG_LOGGED:
++        _THOR_DRAFT_CG_CG_LOGGED = True
++        logger.info("THOR draft-CG gate: N=%d -> cudagraph", num_reqs)
++    return False
++
+ 
+ class DFlashSpeculator(DraftModelSpeculator):
+     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
+@@ -432,6 +549,12 @@
+             else (None, num_query_tokens)
+         )
+         # Every DFlash step has exactly num_query_per_req tokens, so we can use FULL CGs
++        # THOR_DRAFT_CG_GATE (dispatch site): on sm_110, a draft batch below
++        # VLLM_THOR_DRAFT_CG_MIN_BATCH requests runs through the existing
++        # eager fallback (need_eager -> NONE descriptor) instead of
++        # replaying the FULL graph (the c1 fix). Off sm_110 the helper is a
++        # pure no-op; any error degrades to the CG behavior (logged once).
++        need_eager = is_profile or _thor_draft_cg_gate_wants_eager(num_reqs)
+         batch_desc, batch_sync = dispatch_cg_and_sync_dp(
+             self.query_cudagraph_manager,
+             num_reqs,
+@@ -439,7 +562,7 @@
+             uniform_token_count=self.num_query_per_req,
+             dp_size=self.dp_size,
+             dp_rank=self.dp_rank,
+-            need_eager=is_profile,
++            need_eager=need_eager,
+             dp_sync=batch_sync,
+         )
+         num_tokens_padded = batch_desc.num_tokens

@@ -1,0 +1,483 @@
+diff --git a/vllm/vllm_flash_attn/cute/sm100_hd256_2cta_fmha_forward.py b/vllm/vllm_flash_attn/cute/sm100_hd256_2cta_fmha_forward.py
+index 054a655..11413d0 100644
+--- a/vllm/vllm_flash_attn/cute/sm100_hd256_2cta_fmha_forward.py
++++ b/vllm/vllm_flash_attn/cute/sm100_hd256_2cta_fmha_forward.py
+@@ -27,7 +27,11 @@ from vllm.vllm_flash_attn.cute.mask import (
+     Sm100FusedMask as FusedMask,
+ )
+ from vllm.vllm_flash_attn.cute.cute_dsl_utils import assume_tensor_aligned
+-from vllm.vllm_flash_attn.cute.flash_fwd_sm100 import DescaleTensors, _TUNING_CONFIG
++from vllm.vllm_flash_attn.cute.flash_fwd_sm100 import (
++    DescaleTensors,
++    _LOG2_DTYPE_MAX,
++    _TUNING_CONFIG,
++)
+ from vllm.vllm_flash_attn.cute.seqlen_info import SeqlenInfoQK
+ from vllm.vllm_flash_attn.cute.utils import (
+     AuxData,
+@@ -208,8 +212,9 @@ class BlackwellFusedMultiHeadAttentionForward:
+             assert window_size_left is None and window_size_right is None, (
+                 "SM100 forward with head_dim=256 does not support runtime window sizes without seqused_q/seqused_k"
+             )
+-        assert descale_tensors is None, (
+-            "SM100 forward with head_dim=256 does not support descale_tensors"
++
++        assert cutlass.const_expr(mLSE is None or descale_tensors is None), (
++            "hd256 FP8 descale path does not yet produce descale-correct LSE"
+         )
+ 
+         q_tensor, k_tensor, v_tensor, o_tensor = mQ, mK, mV, assume_tensor_aligned(mO)
+@@ -644,6 +649,7 @@ class BlackwellFusedMultiHeadAttentionForward:
+             TileScheduler,
+             aux_data,
+             fastdiv_mods,
++            descale_tensors,
+         ).launch(
+             grid=grid,
+             block=[self.threads_per_cta, 1, 1],
+@@ -688,6 +694,7 @@ class BlackwellFusedMultiHeadAttentionForward:
+         TileScheduler: cutlass.Constexpr,
+         aux_data: AuxData = AuxData(),
+         fastdiv_mods=(None, None),
++        descale_tensors: Optional[DescaleTensors] = None,
+     ):
+         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+ 
+@@ -1434,6 +1441,15 @@ class BlackwellFusedMultiHeadAttentionForward:
+                         row_max = -Float32.inf
+                         row_max_prev = -Float32.inf
+                         row_sum = 0.0
++                        # THOR_SM110_FA4_HD256_FP8: load the per-(batch, kv_head)
++                        # qk descale once per work-tile (every K-tile below reuses it).
++                        if cutlass.const_expr(descale_tensors is not None):
++                            kv_head_idx = self._kv_head_idx(curr_block_coord[2][0])
++                            qk_descale, _ = self._load_effective_descales(
++                                descale_tensors, batch_coord, kv_head_idx
++                            )
++                        else:
++                            qk_descale = Float32(1.0)
+ 
+                         end_count = start_count + trip_count
+                         if cutlass.const_expr(self.use_semantic_trip_range):
+@@ -1490,12 +1506,14 @@ class BlackwellFusedMultiHeadAttentionForward:
+                                     seqlen_q,
+                                     seqlen_k,
+                                     scale_softmax_log2,
++                                    qk_descale,
+                                 ),
+                                 (tStS, tScS_iter, qk_thr_mma),
+                                 (mma_s_consumer, p_mma_producer, s_corr_producer),
+                                 seqlen_info,
+                                 aux_data,
+                                 tile_fastdiv_mods,
++                                descale_tensors,
+                             )
+                             row_max_prev = row_max
+                         sum_producer = self.store_sum_max(
+@@ -1581,17 +1599,32 @@ class BlackwellFusedMultiHeadAttentionForward:
+                     # Empty step as the first step is no need for correction
+                     stats_handle = s_corr_consumer.wait_and_advance()
+                     stats_handle.release()
++                    # THOR_SM110_FA4_HD256_FP8: load the per-(batch, kv_head) qk + v
++                    # descales once per work-tile. qk_descale is folded into the
++                    # cross-n-block rescale scale below (it must equal the softmax-step
++                    # scale that produced P / row_sum, otherwise O_acc and row_sum are
++                    # rebased by different factors); v_descale folds into the final
++                    # row-sum normalization in the epilogue.
++                    if cutlass.const_expr(descale_tensors is not None):
++                        kv_head_idx = self._kv_head_idx(curr_block_coord[2][0])
++                        qk_descale, v_descale = self._load_effective_descales(
++                            descale_tensors, batch_coord, kv_head_idx
++                        )
++                        descaled_scale_log2 = scale_softmax_log2 * qk_descale
++                    else:
++                        v_descale = Float32(1.0)
++                        descaled_scale_log2 = scale_softmax_log2
+                     for step in cutlass.range(1, seqlen_kv_loop_steps, 1, unroll=1):
+                         # Oi-1 -> Oi
+                         mma_corr_consumer, s_corr_consumer = self.correction_rescale(
+-                            scale_softmax_log2,
++                            descaled_scale_log2,
+                             (s_corr_consumer, tStS, tScS),
+                             (mma_corr_consumer, tOtO_staged, cO_staged),
+                             self.epi_tile,
+                         )
+                     # O_partial -> O_final
+                     mma_corr_consumer, sum_consumer = self.correction_epilog(
+-                        (seqlen_q, scale_output),
++                        (seqlen_q, scale_output, v_descale),
+                         (sum_consumer, sSum),
+                         (
+                             mma_corr_consumer,
+@@ -1602,6 +1635,7 @@ class BlackwellFusedMultiHeadAttentionForward:
+                             gmem_tiled_copy_o,
+                         ),
+                         self.epi_tile,
++                        descale_tensors,
+                     )
+                 if not continue_cond and seqlen_kv_loop_steps == 0:
+                     mO_qdl_eff = mO_qdl
+@@ -1677,6 +1711,38 @@ class BlackwellFusedMultiHeadAttentionForward:
+         tOtO_staged = cute.make_tensor(tOtO.iterator + self.tmem_o_offset, tOtO_layout)
+         return tStS, tOtO_staged
+ 
++    # THOR_SM110_FA4_HD256_FP8
++    # FP8 descale plumbing transcribed from flash_fwd_sm100.py (_kv_head_idx /
++    # _load_effective_descales, :2003-2027). Used only on the e4m3 path; on the
++    # bf16/fp16 path (no descales) both helpers reduce to the identity.
++
++    @cute.jit
++    def _kv_head_idx(self, head_idx: Int32) -> Int32:
++        """Map query-head tile index -> KV-head index (FA3 descale semantics).
++
++        hd256 never uses pack_gqa (asserted in __init__), so this is always the
++        plain ``head_idx // qhead_per_kvhead`` mapping."""
++        return head_idx // self.qhead_per_kvhead
++
++    @cute.jit
++    def _load_effective_descales(
++        self,
++        descale_tensors: Optional[DescaleTensors],
++        batch_idx: Int32,
++        kv_head_idx: Int32,
++    ) -> Tuple[Float32, Float32]:
++        """Load effective QK and V descales, defaulting unspecified tensors to identity."""
++        qk_descale = Float32(1.0)
++        v_descale = Float32(1.0)
++        if cutlass.const_expr(descale_tensors is not None):
++            if cutlass.const_expr(descale_tensors.q_descale is not None):
++                qk_descale = qk_descale * Float32(descale_tensors.q_descale[batch_idx, kv_head_idx])
++            if cutlass.const_expr(descale_tensors.k_descale is not None):
++                qk_descale = qk_descale * Float32(descale_tensors.k_descale[batch_idx, kv_head_idx])
++            if cutlass.const_expr(descale_tensors.v_descale is not None):
++                v_descale = Float32(descale_tensors.v_descale[batch_idx, kv_head_idx])
++        return qk_descale, v_descale
++
+     @cute.jit
+     def softmax_step(
+         self,
+@@ -1687,6 +1753,7 @@ class BlackwellFusedMultiHeadAttentionForward:
+         seqlen_info: SeqlenInfoQK,
+         aux_data: AuxData = AuxData(),
+         fastdiv_mods=(None, None),
++        descale_tensors: Optional[DescaleTensors] = None,
+     ) -> Tuple[Float32, Float32, pipeline.PipelineConsumer, pipeline.PipelineProducer]:
+         (
+             need_apply_mask,
+@@ -1699,7 +1766,7 @@ class BlackwellFusedMultiHeadAttentionForward:
+             head_idx,
+         ) = mask_args
+         n_block = step
+-        row_max, row_sum, seqlen_q, seqlen_k, scale_softmax_log2 = value_args
++        row_max, row_sum, seqlen_q, seqlen_k, scale_softmax_log2, qk_descale = value_args
+         tStS, tScS, qk_thr_mma = tensor_args
+         mma_s_consumer, p_mma_producer, s_corr_producer = pipeline_args
+         tidx, _, _ = cute.arch.thread_idx()
+@@ -1813,8 +1880,21 @@ class BlackwellFusedMultiHeadAttentionForward:
+         cute.arch.fence_view_async_tmem_store()
+         stats_handle.commit()
+ 
+-        scale = scale_softmax_log2
+-        minus_row_max_scale = (0.0 - row_max_safe) * scale
++        if cutlass.const_expr(descale_tensors is not None):
++            # THOR_SM110_FA4_HD256_FP8: fold the per-(batch, kv_head) qk descale and
++            # the 2**8 low-precision offset into the log2 softmax scale so the fp8 P
++            # matrix spends its unused upper code points on the probability tail.
++            # max_offset (8) must stay below log2(max q_dtype value) to avoid
++            # saturating P (see Note [Low Precision Scaling] in flash_fwd_sm100).
++            assert 8 < _LOG2_DTYPE_MAX[self.q_dtype], (
++                "max_offset (8) must stay below log2(max q_dtype value) to avoid saturating P"
++            )
++            max_offset = Float32(8.0)
++            scale = scale_softmax_log2 * qk_descale
++            minus_row_max_scale = max_offset + (0.0 - row_max_safe) * scale
++        else:
++            scale = scale_softmax_log2
++            minus_row_max_scale = (0.0 - row_max_safe) * scale
+         # Acquire P write slot early — overlaps any pipeline stall with exp2 compute
+         p_handle = p_mma_producer.acquire_and_advance()
+         # Fragment-based FMA + exp2 + bf16 conversion
+@@ -2019,8 +2099,9 @@ class BlackwellFusedMultiHeadAttentionForward:
+         sum_args: Tuple,
+         o_args: Tuple,
+         epi_tile: cute.Tile,
++        descale_tensors: Optional[DescaleTensors] = None,
+     ) -> Tuple[pipeline.PipelineConsumer, pipeline.PipelineProducer]:
+-        (seqlen_q, scale_output) = value_args
++        (seqlen_q, scale_output, v_descale) = value_args
+         (sum_consumer, sSum) = sum_args
+         (
+             mma_o_consumer,
+@@ -2040,7 +2121,14 @@ class BlackwellFusedMultiHeadAttentionForward:
+             sO = sO_staged[None, None, 0]
+             row_sum = sSum[thread_idx]
+             row_sum_is_zero_or_nan = row_sum == 0.0 or row_sum != row_sum
+-            scale = scale_output / row_sum if not row_sum_is_zero_or_nan else 0.0
++            # THOR_SM110_FA4_HD256_FP8: fold the per-(batch, kv_head) v descale into the
++            # final row-sum normalization. The 2**max_offset factor carried by O_acc
++            # cancels against the identical factor in row_sum, so no max_offset_scale
++            # division is needed here (hd256 has no sinks/LSE in this path).
++            if cutlass.const_expr(descale_tensors is not None):
++                scale = (scale_output * v_descale) / row_sum if not row_sum_is_zero_or_nan else 0.0
++            else:
++                scale = scale_output / row_sum if not row_sum_is_zero_or_nan else 0.0
+             tOtO = tOtO_staged[(None, None), 0, 0, iter]
+             tOtO_epi = cute.zipped_divide(tOtO, epi_tile)
+             sO_epi = cute.zipped_divide(sO, epi_tile)
+diff --git a/vllm/v1/attention/backends/fa_utils.py b/vllm/v1/attention/backends/fa_utils.py
+index 9a91b97..e45e9be 100644
+--- a/vllm/v1/attention/backends/fa_utils.py
++++ b/vllm/v1/attention/backends/fa_utils.py
+@@ -249,7 +249,20 @@ def _fa4_hd256_fallback_reason(
+         and getattr(model_config.hf_text_config, "attn_logit_softcapping", None)
+     ):
+         return "logits soft capping"
+-    if cache_config is not None and is_quantized_kv_cache(cache_config.cache_dtype):
++    if (
++        cache_config is not None
++        and is_quantized_kv_cache(cache_config.cache_dtype)
++        and not (
++            # THOR_SM110_FA4_HD256_FP8: on Jetson Thor the dedicated hd256
++            # kernel consumes FP8 KV with descales once its one-shot probe
++            # has verified the descale path on this device. This reject
++            # only fires on the fa_version == 4 path (its sole call site is
++            # get_flash_attn_version's hd256 branch), so the grant is a
++            # no-op off sm_110 and under the sm_110 default (FA2).
++            current_platform.is_device_capability_family(110)
++            and _thor_fa4_hd256_fp8kv_probe()
++        )
++    ):
+         return f"quantized KV cache dtype {cache_config.cache_dtype}"
+     if kv_cache_block_size is not None and kv_cache_block_size % FA4_HD256_PAGE_SIZE:
+         # Larger blocks are split into 128-token kernel pages.
+@@ -437,6 +450,205 @@ def _thor_fa4_fp8kv_probe() -> bool:
+         return _finish(False, f"probe failed: {type(exc).__name__}: {exc}")
+ 
+ 
++# THOR_SM110_FA4_HD256_FP8_PROBE
++# Process-cached, lazily computed verdict for the FA4 (CuTe-DSL)
++# head_dim=256 full-FP8 attention path on the SM110 family (Jetson
++# Thor). The dedicated hd256 2-CTA kernel is a different compiled
++# unit from the hd<=128 kernel that _thor_fa4_fp8kv_probe above
++# exercises, so its FP8 descale path needs its own one-shot
++# validation before the policy admits an hd256 model to FP8 KV.
++# Same contract as that probe: at most once per process, never at
++# import time, no per-forward overhead, and any failure (no CUDA,
++# CuteDSL missing, JIT failure, OOM, non-finite or divergent output)
++# yields False, keeping the gate closed exactly as stock vLLM does.
++_THOR_FA4_HD256_FP8KV_PROBE_RESULT: bool | None = None
++
++
++def _thor_fa4_hd256_fp8kv_probe() -> bool:
++    """
++    Run one small full-FP8 paged GQA prefill and a decode through the
++    real FA4 head_dim=256 kernel path and compare them against fp32
++    references of the same quantized operands (e4m3 tolerance).
++
++    Returns the cached verdict once computed; ``False`` on any probe
++    failure, which keeps the FP8-KV gate closed for FA4 head_dim=256
++    on this device.
++    """
++    global _THOR_FA4_HD256_FP8KV_PROBE_RESULT
++    if _THOR_FA4_HD256_FP8KV_PROBE_RESULT is not None:
++        return _THOR_FA4_HD256_FP8KV_PROBE_RESULT
++
++    def _finish(enabled: bool, detail: str) -> bool:
++        global _THOR_FA4_HD256_FP8KV_PROBE_RESULT
++        _THOR_FA4_HD256_FP8KV_PROBE_RESULT = enabled
++        if enabled:
++            logger.info("THOR FA4 hd256 FP8-KV probe: enabled on sm_110 (%s)", detail)
++        else:
++            logger.info("THOR FA4 hd256 FP8-KV probe: disabled (%s)", detail)
++        return enabled
++
++    if not current_platform.is_cuda():
++        return _finish(False, "CUDA is not available")
++    if not current_platform.is_device_capability_family(110):
++        return _finish(False, "device is not SM11x")
++
++    try:
++        import torch
++
++        # The production FA4 dispatcher: it imports the CuteDSL
++        # interface (and with it the kernel JIT machinery) lazily
++        # inside the call, so this — the probe's only import — keeps
++        # fa_utils free of import-time side effects.
++        from vllm.vllm_flash_attn import flash_attn_varlen_func
++
++        # The target model's real full-attention geometry (Qwen3.8-27B):
++        # GQA 24 q heads / 4 kv heads, head dim 256, page size 128 (the
++        # hd256 kernel is TMA-paged-only), causal. Two shapes at two
++        # seq lengths: a prefill (q_len == kv_len) and a decode
++        # (q_len == 1). Full FP8: the attention layer quantizes Q to
++        # e4m3 whenever the KV cache is e4m3, so Q, K and V are all
++        # e4m3 here.
++        num_q_heads = 24
++        num_kv_heads = 4
++        head_dim = 256
++        page_size = 128
++        device = "cuda"
++        qhead_per_kvhead = num_q_heads // num_kv_heads
++        cases = [  # (batch, kv_len, q_len)
++            (1, 256, 256),  # prefill: one 128-token page
++            (1, 512, 1),  # decode: two pages
++            # Two sequences: re-verify per-(batch, kv_head) descale indexing
++            # (batch > 0) that the single-sequence cases above cannot cover.
++            (2, 256, 256),
++        ]
++        scale = head_dim ** -0.5
++
++        # Non-trivial, per-(batch, kv_head) descales (all >= 1): the q*k
++        # product stays >= 1 so the softmax is at least as peaked as the
++        # all-ones case, while the per-head-varying magnitudes exercise the
++        # qk_descale and v_descale folds end to end. Each batch row is
++        # distinct from the others (the probe2a-fp8.py ``pat`` pattern), so
++        # a wrong batch index (batch 0 reading batch 1's descales) would
++        # break the A/B.
++        def descales(off: int, batch: int) -> "torch.Tensor":
++            vals = [
++                [
++                    1.0 + 0.0625 * (((b + g + off) % num_kv_heads) + 1)
++                    for g in range(num_kv_heads)
++                ]
++                for b in range(batch)
++            ]
++            return torch.tensor(vals, dtype=torch.float32, device=device)
++
++        for batch, kv_len, q_len in cases:
++            torch.manual_seed(12345 + batch * 100003 + kv_len)
++            num_pages = kv_len // page_size
++            num_pages_total = batch * num_pages
++            # Q is flat over all sequences; K/V live in one paged pool with
++            # contiguous page ranges per sequence (the hd256 kernel is
++            # TMA-paged-only, and all sequences share kv_len so
++            # max_seqlen_k == kv_len satisfies its paged asserts).
++            q = torch.randn(
++                batch * q_len, num_q_heads, head_dim, device=device
++            ).to(torch.float8_e4m3fn)
++            k = torch.randn(
++                num_pages_total, page_size, num_kv_heads, head_dim, device=device
++            ).to(torch.float8_e4m3fn)
++            v = torch.randn(
++                num_pages_total, page_size, num_kv_heads, head_dim, device=device
++            ).to(torch.float8_e4m3fn)
++            q_descale = descales(0, batch)
++            k_descale = descales(2, batch)
++            v_descale = descales(1, batch)
++            k_pool = k.view(num_pages_total, page_size, num_kv_heads, head_dim)
++            v_pool = v.view(num_pages_total, page_size, num_kv_heads, head_dim)
++            cu_seqlens_q = torch.tensor(
++                [q_len * (b + 1) for b in range(-1, batch)],
++                device=device,
++                dtype=torch.int32,
++            )
++            seqused_k = torch.full((batch,), kv_len, dtype=torch.int32, device=device)
++            block_table = torch.arange(
++                num_pages_total, device=device, dtype=torch.int32
++            ).view(batch, num_pages)
++
++            out = flash_attn_varlen_func(
++                q=q,
++                k=k_pool,
++                v=v_pool,
++                max_seqlen_q=q_len,
++                cu_seqlens_q=cu_seqlens_q,
++                max_seqlen_k=kv_len,
++                seqused_k=seqused_k,
++                block_table=block_table,
++                softmax_scale=scale,
++                causal=True,
++                q_descale=q_descale,
++                k_descale=k_descale,
++                v_descale=v_descale,
++                fa_version=4,
++            )
++            torch.cuda.synchronize()
++            out = out[0] if isinstance(out, tuple) else out
++
++            # fp32 reference: per sequence, dequant (per-(batch, kv_head)
++            # descales) + standard bottom-right-aligned causal GQA attention
++            # over the same e4m3 values the kernel reads. The 2**max_offset
++            # factor carried by the kernel's P matrix cancels between O_acc
++            # and row_sum, so no offset correction is needed here.
++            qf = q.float()
++            ref_parts: list[torch.Tensor] = []
++            for b in range(batch):
++                qb = qf[b * q_len : (b + 1) * q_len]
++                kb = k_pool[b * num_pages : (b + 1) * num_pages].view(
++                    kv_len, num_kv_heads, head_dim
++                ).float()
++                vb = v_pool[b * num_pages : (b + 1) * num_pages].view(
++                    kv_len, num_kv_heads, head_dim
++                ).float()
++                q_deq = (
++                    qb
++                    * q_descale[b]
++                    .repeat_interleave(qhead_per_kvhead)
++                    .view(1, num_q_heads, 1)
++                )
++                k_deq = kb * k_descale[b].view(1, num_kv_heads, 1)
++                v_deq = vb * v_descale[b].view(1, num_kv_heads, 1)
++                s = torch.einsum(
++                    "qgad,kgd->qgak",
++                    q_deq.view(q_len, num_kv_heads, qhead_per_kvhead, head_dim),
++                    k_deq,
++                ) * scale
++                q_idx = torch.arange(q_len, device=device)
++                k_idx = torch.arange(kv_len, device=device)
++                keep = k_idx[None, :] <= (q_idx[:, None] + (kv_len - q_len))
++                p = torch.softmax(
++                    s.masked_fill(~keep.view(q_len, 1, 1, kv_len), float("-inf")),
++                    dim=-1,
++                )
++                o = torch.einsum("qgak,kgd->qgad", p, v_deq)
++                ref_parts.append(o.reshape(q_len, num_q_heads, head_dim))
++            ref = torch.cat(ref_parts, dim=0)
++
++            out_f = out.float()
++            max_err = (out_f - ref).abs().max().item()
++            ref_max = ref.abs().max().item()
++            if not (
++                bool(torch.isfinite(out_f).all())
++                and ref_max > 0.0
++                and max_err <= 2e-2 * ref_max + 1e-2
++            ):
++                return _finish(
++                    False,
++                    f"output diverged from reference "
++                    f"(batch={batch}, kv={kv_len}, q={q_len}, "
++                    f"max_err={max_err:.4g}, ref_max={ref_max:.4g})",
++                )
++        return _finish(True, "prefill + decode + multi-seq within e4m3 tolerance")
++    except Exception as exc:  # noqa: BLE001 - any failure keeps the gate closed
++        return _finish(False, f"probe failed: {type(exc).__name__}: {exc}")
++
++
+ def flash_attn_supports_kv_cache_dtype(
+     kv_cache_dtype: str = "fp8_e4m3",
+     *,
+@@ -464,14 +676,21 @@ def flash_attn_supports_kv_cache_dtype(
+     return (fa_version == 3 and current_platform.is_device_capability_family(90)) or (
+         fa_version == 4 and current_platform.is_device_capability_family(100)
+     ) or (
+-        # THOR SM110: admit FA4 + FP8 KV on Jetson Thor only while the
+-        # one-shot runtime probe above has verified the FP8 kernel on this
++        # THOR SM110: admit FA4 + FP8 KV on Jetson Thor only while a
++        # one-shot runtime probe has verified the FP8 kernel on this
+         # device. Unreachable without an explicit flash_attn_version=4
+         # config (sm_110 defaults to FA2) and False on every other arch,
+         # so this term changes nothing for any existing configuration.
++        # head_dim=256 requests use the dedicated 2-CTA kernel — a
++        # different compiled unit from the hd<=128 kernel — so they are
++        # backed by the hd256 probe specifically, not the hd128 one.
+         fa_version == 4
+         and current_platform.is_device_capability_family(110)
+-        and _thor_fa4_fp8kv_probe()
++        and (
++            _thor_fa4_hd256_fp8kv_probe()
++            if uses_fa4_hd256_kernel(head_size, head_size_v)
++            else _thor_fa4_fp8kv_probe()
++        )
+     )
+ 
+ 

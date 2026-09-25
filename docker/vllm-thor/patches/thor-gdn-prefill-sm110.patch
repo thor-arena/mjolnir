@@ -1,0 +1,176 @@
+diff --git a/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py b/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+--- a/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
++++ b/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+@@ -83,33 +83,139 @@
+     )
+     from aiter.ops.triton.gated_delta_net.fused_rearrange_sigmoid_gdr import (
+         fused_rearrange_sigmoid_gated_delta_rule as gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule,  # noqa: E501
+     )
+ 
+ logger = init_logger(__name__)
+ 
+ MAX_FUSED_GDN_MTP_TOKENS = 8
+ FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
+ 
++# One-shot verdict cache for the Thor (SM 110) GDN prefill probe.
++# None = not probed yet; True = FlashInfer GDN prefill verified on this
++# device; False = keep the Triton prefill path.
++_THOR_GDN_PREFILL_PROBE_VERDICT: bool | None = None
++
++
++def _thor_gdn_prefill_probe_run() -> bool:
++    """Compare the FlashInfer GDN prefill kernel against the Triton/FLA
++    reference on a small deterministic input.
++
++    Returns True when both implementations agree within tight bf16
++    tolerances.  Called at most once per process via
++    ``_thor_gdn_prefill_probe`` (only on SM 110, whose arch family is not
++    in FlashInfer's GDN prefill allowlist).
++    """
++    import torch.nn.functional as F
++
++    device = torch.device("cuda")
++    T = 2 * FLA_CHUNK_SIZE
++    H = 2
++    K = 128
++    V = 128
++    dtype = torch.bfloat16
++
++    gen = torch.Generator(device=device).manual_seed(0)
++
++    def randn(*shape: int) -> torch.Tensor:
++        return torch.randn(*shape, generator=gen, device=device)
++
++    # q/k are pre-L2-normalized to mirror the production prefill path,
++    # where fused_post_conv_prep applies L2 norm and the kernels are
++    # called with use_qk_l2norm_in_kernel=False.
++    q = F.normalize(randn(1, T, H, K), p=2, dim=-1).to(dtype)
++    k = F.normalize(randn(1, T, H, K), p=2, dim=-1).to(dtype)
++    v = randn(1, T, H, V).to(dtype)
++    g = F.logsigmoid(randn(1, T, H)).to(dtype)
++    beta = torch.sigmoid(randn(1, T, H)).to(dtype)
++    # Non-zero initial state so the probe also validates state carry-over.
++    initial_state = randn(1, H, V, K) * 0.01
++    cu_seqlens = torch.tensor([0, T], dtype=torch.int32, device=device)
++
++    o_fi, state_fi = fi_chunk_gated_delta_rule(
++        q=q,
++        k=k,
++        v=v,
++        g=g,
++        beta=beta,
++        initial_state=initial_state,
++        output_final_state=True,
++        cu_seqlens=cu_seqlens,
++        use_qk_l2norm_in_kernel=False,
++    )
++    o_ref, state_ref = fla_chunk_gated_delta_rule(
++        q=q,
++        k=k,
++        v=v,
++        g=g,
++        beta=beta,
++        initial_state=initial_state,
++        output_final_state=True,
++        cu_seqlens=cu_seqlens,
++        use_qk_l2norm_in_kernel=False,
++    )
++
++    out_match = torch.allclose(o_fi.float(), o_ref.float(), rtol=2e-2, atol=1e-3)
++    state_match = torch.allclose(
++        state_fi.float(), state_ref.float(), rtol=2e-2, atol=1e-2
++    )
++    return bool(out_match and state_match)
++
++
++def _thor_gdn_prefill_probe() -> bool:
++    """One-shot, process-cached runtime probe for the FlashInfer GDN
++    prefill kernel on Thor (SM 110).
++
++    Runs at most once; the verdict is cached in
++    ``_THOR_GDN_PREFILL_PROBE_VERDICT`` so later calls are a plain
++    bool read with no per-forward overhead.  A missing CUDA device, any
++    exception (e.g. missing FlashInfer, JIT/kernel failure) or an output
++    mismatch resolves to False, keeping the Triton prefill path.
++    """
++    global _THOR_GDN_PREFILL_PROBE_VERDICT
++    if _THOR_GDN_PREFILL_PROBE_VERDICT is not None:
++        return _THOR_GDN_PREFILL_PROBE_VERDICT
++
++    verdict = False
++    try:
++        if torch.cuda.is_available():
++            verdict = _thor_gdn_prefill_probe_run()
++    except Exception:
++        logger.warning(
++            "THOR GDN prefill probe raised; using the Triton GDN prefill kernel.",
++            exc_info=True,
++        )
++
++    _THOR_GDN_PREFILL_PROBE_VERDICT = verdict
++    if verdict:
++        logger.info("THOR GDN prefill probe: FI kernel enabled on sm_110")
++    else:
++        logger.info("THOR GDN prefill probe failed -> Triton fallback")
++    return verdict
++
+ 
+ def _resolve_gdn_prefill_backend(
+     vllm_config: VllmConfig,
+ ) -> tuple[str, Literal["triton", "flashinfer", "cutedsl"]]:
+     """Resolve GDN prefill backend.
+ 
+     FlashInfer's GDN prefill kernel is chosen when:
+     * ``requested in ["flashinfer", "auto"]``;
+     * ``platform == cuda``;
+     * one of the following:
+       - Hopper (SM90) - no further constraints;
+       - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``;
+-      - Blackwell (SM12.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``.
++      - Blackwell (SM12.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``;
++      - Thor (SM11.x, family 110) with ``head_k_dim == 128``,
++        ``cuda_runtime >= 13``, additionally gated by a one-shot runtime
++        probe that validates the FlashInfer kernel against the Triton
++        reference on the current device.
+ 
+     In-tree CuteDSL GDN prefill kernel is chosen when:
+     * "cutedsl" is requested; (opt-in only)
+     * Blackwell (SM10.x) with ``head_k_dim == 128``;
+     """
+     additional_config = vllm_config.additional_config
+     backend_cfg = (
+         additional_config.get("gdn_prefill_backend", "auto")
+         if isinstance(additional_config, dict)
+         else "auto"
+@@ -135,20 +241,31 @@
+     ):
+         supports_flashinfer = True
+         supports_cutedsl = True
+     elif (
+         current_platform.is_device_capability_family(120)
+         and head_k_dim == 128
+         and current_platform.get_cuda_runtime_major() >= 13
+     ):
+         # The in-tree CuteDSL kernel targets SM100 only, so it stays off here.
+         supports_flashinfer = True
++    elif (
++        # Thor (SM 110) is not in FlashInfer's GDN prefill allowlist, so the
++        # one-shot runtime probe must confirm the kernel actually runs
++        # correctly on the current device before the fast path is granted.
++        current_platform.is_device_capability_family(110)
++        and head_k_dim == 128
++        and current_platform.get_cuda_runtime_major() >= 13
++        and _thor_gdn_prefill_probe()
++    ):
++        # THOR_SM110_GDN_PREFILL_PROBE
++        supports_flashinfer = True
+ 
+     if backend in ["flashinfer", "auto"] and supports_flashinfer:
+         return backend, "flashinfer"
+     if backend == "cutedsl" and supports_cutedsl:
+         return backend, "cutedsl"
+     return backend, "triton"
+ 
+ 
+ def _log_gdn_backend_decision(
+     vllm_config: VllmConfig,

@@ -1,0 +1,36 @@
+diff --git a/vllm/vllm_flash_attn/cute/interface.py b/vllm/vllm_flash_attn/cute/interface.py
+index 91c1ffb..3819188 100644
+--- a/vllm/vllm_flash_attn/cute/interface.py
++++ b/vllm/vllm_flash_attn/cute/interface.py
+@@ -1034,14 +1034,24 @@ def _flash_attn_fwd(
+             and seqlen_q == seqlen_k
+             and seqlen_q % 256 == 0
+         )
+-        hd256_use_2cta = not (
+-            seqused_q is not None
+-            and cu_seqlens_q is None
+-            and page_table is None
++        # decode-shaped hd256 calls (small M) take the 1CTA form
++        hd256_decode_1cta = (
++            max_seqlen_q is not None
++            and max_seqlen_q <= 8                       # decode M (1..8); prefill is 1024+
+             and not local
+-            and (
+-                (not causal and max_seqlen_q <= 1024)
+-                or (causal and max_seqlen_q <= 2048 and max_seqlen_k <= 2048)
++            and (page_size in (None, tile_n))           # dense or paged-128 TMA (only legal hd256 paged mode)
++        )
++        hd256_use_2cta = not (
++            hd256_decode_1cta
++            or (
++                seqused_q is not None
++                and cu_seqlens_q is None
++                and page_table is None
++                and not local
++                and (
++                    (not causal and max_seqlen_q <= 1024)
++                    or (causal and max_seqlen_q <= 2048 and max_seqlen_k <= 2048)
++                )
+             )
+         )
+ 

@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 520" width="1180" height="520" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0D1117"/>
+      <stop offset="1" stop-color="#131A24"/>
+    </linearGradient>
+    <linearGradient id="amber" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFC857"/>
+      <stop offset="1" stop-color="#F0883E"/>
+    </linearGradient>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L8,4.5 L0,9 Z" fill="#8B949E"/>
+    </marker>
+    <marker id="arrA" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L8,4.5 L0,9 Z" fill="#FFB224"/>
+    </marker>
+  </defs>
+
+  <rect width="1180" height="520" fill="url(#bg)"/>
+  <text x="40" y="52" font-size="26" font-weight="700" fill="#E6EDF3">How a benchmark run flows</text>
+  <rect x="42" y="66" width="180" height="4" rx="2" fill="url(#amber)"/>
+
+  <!-- row 1: the three runtime boxes -->
+  <g>
+    <rect x="40" y="110" width="270" height="130" rx="14" fill="#151B26" stroke="#21262D" stroke-width="1.5"/>
+    <text x="64" y="150" font-size="22" font-weight="700" fill="#E6EDF3">mjolnir CLI</text>
+    <text x="64" y="182" font-size="16" fill="#8B949E">typer · python 3.10+</text>
+    <text x="64" y="208" font-size="16" fill="#8B949E">serve · bench · verify · plot</text>
+
+    <rect x="405" y="110" width="360" height="130" rx="14" fill="#151B26" stroke="#21262D" stroke-width="1.5"/>
+    <text x="429" y="146" font-size="22" font-weight="700" fill="#E6EDF3">docker · vllm-thor image</text>
+    <text x="429" y="176" font-size="16" fill="#8B949E">13 hand-adapted sm_110 patches</text>
+    <rect x="429" y="190" width="150" height="28" rx="14" fill="#1C2230" stroke="#21262D"/>
+    <text x="504" y="209" font-size="14" fill="#FFB224" text-anchor="middle">FA4 GEMV kernel</text>
+    <rect x="590" y="190" width="152" height="28" rx="14" fill="#1C2230" stroke="#21262D"/>
+    <text x="666" y="209" font-size="14" fill="#2DD4BF" text-anchor="middle">:8000 → host :6001</text>
+
+    <rect x="880" y="110" width="260" height="130" rx="14" fill="#151B26" stroke="#21262D" stroke-width="1.5"/>
+    <text x="904" y="150" font-size="22" font-weight="700" fill="#E6EDF3">clean-window gate</text>
+    <text x="904" y="182" font-size="16" fill="#8B949e">polls vLLM /metrics</text>
+    <text x="904" y="208" font-size="16" fill="#8B949E">queue 0/0 × N samples</text>
+  </g>
+
+  <!-- row-1 arrows -->
+  <line x1="310" y1="175" x2="403" y2="175" stroke="#8B949E" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="357" y="163" font-size="14" fill="#8B949E" text-anchor="middle" font-family="'Cascadia Code','JetBrains Mono',Consolas,monospace">docker run</text>
+  <line x1="765" y1="175" x2="878" y2="175" stroke="#8B949E" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="822" y="163" font-size="14" fill="#8B949E" text-anchor="middle" font-family="'Cascadia Code','JetBrains Mono',Consolas,monospace">gated</text>
+  <path d="M960 240 C 960 300, 700 300, 630 244" fill="none" stroke="#8B949E" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arr)"/>
+  <text x="800" y="316" font-size="14" fill="#8B949E" text-anchor="middle" font-family="'Cascadia Code','JetBrains Mono',Consolas,monospace">vllm:num_requests_running/waiting == 0/0</text>
+
+  <!-- row 2: data path -->
+  <g>
+    <rect x="40" y="380" width="250" height="100" rx="14" fill="#151B26" stroke="#21262D" stroke-width="1.5"/>
+    <text x="64" y="418" font-size="20" font-weight="700" fill="#E6EDF3">llama-benchy</text>
+    <text x="64" y="448" font-size="15" fill="#8B949E">raw JSON · per-run values</text>
+    <text x="64" y="470" font-size="15" fill="#8B949E">--runs 5 · --exact-tg</text>
+
+    <rect x="365" y="380" width="250" height="100" rx="14" fill="#151B26" stroke="#21262D" stroke-width="1.5"/>
+    <text x="389" y="418" font-size="20" font-weight="700" fill="#E6EDF3">history.jsonl</text>
+    <text x="389" y="448" font-size="15" fill="#8B949E">append-only · git-tracked</text>
+    <text x="389" y="470" font-size="15" fill="#8B949E">one row per gated sweep</text>
+
+    <rect x="690" y="380" width="250" height="100" rx="14" fill="#151B26" stroke="#21262D" stroke-width="1.5"/>
+    <text x="714" y="418" font-size="20" font-weight="700" fill="#E6EDF3">mjolnir plot</text>
+    <text x="714" y="448" font-size="15" fill="#8B949E">kernel.png · fa4-vs-fi.png</text>
+    <text x="714" y="470" font-size="15" fill="#8B949E">history.png (living)</text>
+
+    <rect x="1010" y="380" width="130" height="100" rx="14" fill="#1A1205" stroke="#FFB224" stroke-width="1.5" opacity="0.9"/>
+    <text x="1075" y="424" font-size="20" font-weight="700" fill="#FFB224" text-anchor="middle">README</text>
+    <text x="1075" y="452" font-size="14" fill="#8B949E" text-anchor="middle">charts in</text>
+  </g>
+
+  <!-- row-2 arrows -->
+  <line x1="290" y1="430" x2="363" y2="430" stroke="#FFB224" stroke-width="2" marker-end="url(#arrA)"/>
+  <line x1="615" y1="430" x2="688" y2="430" stroke="#FFB224" stroke-width="2" marker-end="url(#arrA)"/>
+  <line x1="940" y1="430" x2="1008" y2="430" stroke="#FFB224" stroke-width="2" marker-end="url(#arrA)"/>
+  <line x1="575" y1="240" x2="165" y2="378" stroke="#8B949E" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arr)"/>
+  <text x="330" y="330" font-size="14" fill="#8B949E" text-anchor="middle" font-family="'Cascadia Code','JetBrains Mono',Consolas,monospace">benchmarks the live server</text>
+</svg>

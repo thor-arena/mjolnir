@@ -1,0 +1,200 @@
+diff --git a/vllm/v1/attention/backends/fa_utils.py b/vllm/v1/attention/backends/fa_utils.py
+index 650fc1d..9a91b97 100644
+--- a/vllm/v1/attention/backends/fa_utils.py
++++ b/vllm/v1/attention/backends/fa_utils.py
+@@ -279,6 +279,164 @@ def is_fa_version_supported(fa_version: int) -> bool:
+         return False
+ 
+ 
++# THOR_SM110_FA4_PROBE
++# Process-cached, lazily computed verdict for the FA4 (CuteDSL) full-FP8
++# attention path on the SM110 family (Jetson Thor). Whether FA4's FP8
++# kernel executes correctly on a given SM110 device is a runtime question
++# (the kernel is JIT-compiled per arch), so the FP8-KV gate admits FA4 on
++# the SM110 family only while this one-shot probe has verified the kernel
++# on the current device. The probe runs at most once per process, never at
++# import time, adds no per-forward overhead, and any failure (no CUDA,
++# CuteDSL missing, JIT failure, OOM, non-finite or divergent output)
++# yields False, keeping the gate closed exactly as stock vLLM does.
++_THOR_FA4_FP8KV_PROBE_RESULT: bool | None = None
++
++
++def _thor_fa4_fp8kv_probe() -> bool:
++    """
++    Run one small full-FP8 paged GQA decode through the real FA4 path and
++    compare it against an fp32 reference of the same quantized operands
++    (e4m3 tolerance).
++
++    Returns the cached verdict once computed; ``False`` on any probe
++    failure, which keeps the FP8-KV gate closed for FA4 on this device.
++    """
++    global _THOR_FA4_FP8KV_PROBE_RESULT
++    if _THOR_FA4_FP8KV_PROBE_RESULT is not None:
++        return _THOR_FA4_FP8KV_PROBE_RESULT
++
++    def _finish(enabled: bool, detail: str) -> bool:
++        global _THOR_FA4_FP8KV_PROBE_RESULT
++        _THOR_FA4_FP8KV_PROBE_RESULT = enabled
++        if enabled:
++            logger.info("THOR FA4 FP8-KV probe: enabled on sm_110 (%s)", detail)
++        else:
++            logger.info("THOR FA4 FP8-KV probe: disabled (%s)", detail)
++        return enabled
++
++    if not current_platform.is_cuda():
++        return _finish(False, "CUDA is not available")
++    if not current_platform.is_device_capability_family(110):
++        return _finish(False, "device is not SM11x")
++
++    try:
++        import torch
++
++        # The production FA4 dispatcher: it imports the CuteDSL interface
++        # (and with it the kernel JIT machinery) lazily inside the call,
++        # so this — the probe's only import — keeps fa_utils free of
++        # import-time side effects.
++        from vllm.vllm_flash_attn import flash_attn_varlen_func
++
++        # Qwen3.8-shaped paged decode — the shape class vLLM actually
++        # issues: B=2, GQA 8 q heads / 4 kv heads, head dim 128, page size
++        # 16 (the cp.async non-TMA KV path), causal, ragged KV lengths.
++        # Full FP8: the attention layer quantizes Q to e4m3 whenever the
++        # KV cache is e4m3, so Q, K and V are all e4m3 here.
++        batch = 2
++        num_q_heads = 8
++        num_kv_heads = 4
++        head_dim = 128
++        page_size = 16
++        num_pages = 10
++        seqused_k = [96, 64]
++        device = "cuda"
++
++        generator = torch.Generator(device=device).manual_seed(1234)
++        q = torch.randn(
++            batch,
++            num_q_heads,
++            head_dim,
++            generator=generator,
++            device=device,
++            dtype=torch.float32,
++        ).to(torch.float8_e4m3fn)
++        k = torch.randn(
++            num_pages,
++            page_size,
++            num_kv_heads,
++            head_dim,
++            generator=generator,
++            device=device,
++            dtype=torch.float32,
++        ).to(torch.float8_e4m3fn)
++        v = torch.randn(
++            num_pages,
++            page_size,
++            num_kv_heads,
++            head_dim,
++            generator=generator,
++            device=device,
++            dtype=torch.float32,
++        ).to(torch.float8_e4m3fn)
++        cu_seqlens_q = torch.arange(0, batch + 1, device=device, dtype=torch.int32)
++        seqused_k_t = torch.tensor(seqused_k, device=device, dtype=torch.int32)
++        block_table = torch.zeros(batch, num_pages, device=device, dtype=torch.int32)
++        cursor = 0
++        for b, used in enumerate(seqused_k):
++            npages = used // page_size
++            block_table[b, :npages] = torch.arange(
++                cursor, cursor + npages, device=device, dtype=torch.int32
++            )
++            cursor += npages
++        descale = torch.ones(
++            batch, num_kv_heads, device=device, dtype=torch.float32
++        )
++
++        out = flash_attn_varlen_func(
++            q=q,
++            k=k,
++            v=v,
++            max_seqlen_q=1,
++            cu_seqlens_q=cu_seqlens_q,
++            max_seqlen_k=max(seqused_k),
++            seqused_k=seqused_k_t,
++            block_table=block_table,
++            softmax_scale=head_dim ** -0.5,
++            causal=True,
++            q_descale=descale,
++            k_descale=descale,
++            v_descale=descale,
++            fa_version=4,
++        )
++        torch.cuda.synchronize()
++
++        # fp32 reference: de-page + dequant (identity descales) + standard
++        # causal GQA attention over the same e4m3 values the kernel reads.
++        scale = head_dim ** -0.5
++        qf = q.float()
++        ref_rows = []
++        for b, used in enumerate(seqused_k):
++            pages = block_table[b, : used // page_size]
++            kf = k[pages].reshape(used, num_kv_heads, head_dim).float()
++            vf = v[pages].reshape(used, num_kv_heads, head_dim).float()
++            for h in range(num_q_heads):
++                g = h // (num_q_heads // num_kv_heads)
++                # seqlen_q=1 sits at the last position, so the bottom-
++                # right-aligned causal mask keeps every key visible.
++                p = torch.softmax(qf[b, h] @ kf[:, g].t() * scale, dim=-1)
++                ref_rows.append(p @ vf[:, g])
++        ref = torch.stack(ref_rows).reshape(batch, num_q_heads, head_dim)
++
++        out_f = out.float()
++        max_err = (out_f - ref).abs().max().item()
++        ref_max = ref.abs().max().item()
++        ok = (
++            bool(torch.isfinite(out_f).all())
++            and ref_max > 0.0
++            and max_err <= 2e-2 * ref_max + 1e-2
++        )
++        if ok:
++            return _finish(ok, f"maxerr={max_err:.4g} vs fp32 reference")
++        return _finish(
++            ok,
++            f"output diverged from reference "
++            f"(max_err={max_err:.4g}, ref_max={ref_max:.4g})",
++        )
++    except Exception as exc:  # noqa: BLE001 - any failure keeps the gate closed
++        return _finish(False, f"probe failed: {type(exc).__name__}: {exc}")
++
++
+ def flash_attn_supports_kv_cache_dtype(
+     kv_cache_dtype: str = "fp8_e4m3",
+     *,
+@@ -305,6 +463,15 @@ def flash_attn_supports_kv_cache_dtype(
+     )
+     return (fa_version == 3 and current_platform.is_device_capability_family(90)) or (
+         fa_version == 4 and current_platform.is_device_capability_family(100)
++    ) or (
++        # THOR SM110: admit FA4 + FP8 KV on Jetson Thor only while the
++        # one-shot runtime probe above has verified the FP8 kernel on this
++        # device. Unreachable without an explicit flash_attn_version=4
++        # config (sm_110 defaults to FA2) and False on every other arch,
++        # so this term changes nothing for any existing configuration.
++        fa_version == 4
++        and current_platform.is_device_capability_family(110)
++        and _thor_fa4_fp8kv_probe()
+     )
+ 
+ 
+diff --git a/vllm/vllm_flash_attn/cute/interface.py b/vllm/vllm_flash_attn/cute/interface.py
+index 7c36660..91c1ffb 100644
+--- a/vllm/vllm_flash_attn/cute/interface.py
++++ b/vllm/vllm_flash_attn/cute/interface.py
+@@ -907,7 +907,9 @@ def _flash_attn_fwd(
+         # fp16 in-kernel and casting the fp32 accumulator to O's dtype in the epilogue.
+         dtype = torch2cute_dtype_map[torch.float16]
+     if is_fp8:
+-        assert arch // 10 == 10, "FP8 is only supported on SM100 (compute capability 10.x) for FA4 CuTe."
++        assert arch // 10 in (10, 11), (
++            "FP8 is only supported on SM100/SM110 (compute capability 10.x/11.x) for FA4 CuTe."
++        )
+     use_block_sparsity = block_sparse_tensors is not None
+ 
+     causal, local, window_size_left, window_size_right = _resolve_causal_local_window(

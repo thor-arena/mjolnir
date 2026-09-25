@@ -1,0 +1,78 @@
+model: QUASAR-QAT/Qwen3.8-27B-QUASAR-NVFP4
+served-model-name: Qwen/Qwen3.8-27B
+
+dtype: bfloat16
+
+performance-mode: throughput
+optimization-level: 3
+compilation-config:
+  cudagraph_num_of_warmups: 5
+  custom_ops:
+    - +rotary_embedding
+  pass_config:
+    eliminate_noops: true
+    fuse_allreduce_rms: false
+
+disable-custom-all-reduce: true
+trust-remote-code: true
+enforce-eager: false
+
+max-num-seqs: 8
+max-model-len: 200K
+max-num-batched-tokens: 16K
+gpu-memory-utilization: 0.80
+
+enable-auto-tool-choice: true
+tool-call-parser: qwen3_coder
+reasoning-parser: qwen3
+
+# ── Attention / linear backends ─────────────────────────────────────────────
+attention-backend: flashinfer # TRITON_ATTN
+enable-flashinfer-autotune: true
+mm-encoder-attn-backend: TORCH_SDPA   # SM110 ViT PTX-crash workaround (vLLM issue #38411)
+linear-backend: auto                  # do NOT hardcode flashinfer-cutlass — that's the RTX5090/SM120 GEMM path, not SM110
+
+# ── KV Cache ─────────────────────────────────────────────────────────────
+kv-cache-dtype: fp8   # NVFP4 KV isn't available on SM110 for this arch; FP8 matches the checkpoint's own design (NVFP4 weights, FP8 KV)
+kv-cache-dtype-skip-layers: sliding_window
+mamba-cache-mode: align
+mamba-cache-dtype: bfloat16
+mamba-ssm-cache-dtype: bfloat16
+
+# ── Multimodal ─────────────────────────────────────────────────────────────
+language-model-only: true
+mm-encoder-tp-mode: data
+mm-processor-cache-type: shm
+limit-mm-per-prompt:
+  image: 4
+  video: 0
+
+# ── Caching & Scheduling ─────────────────────────────────────────────────
+enable-prefix-caching: true
+enable-chunked-prefill: true
+async-scheduling: true
+
+# ── Speculative Decoding — MTP (built-in head), K=3 ─────────────────────
+speculative-config:
+  method: mtp
+  num_speculative_tokens: 3
+
+# ── Generation defaults (Qwen3.8 card's documented Thinking-mode preset) ────
+# NOTE: the verified Thor launch args do not set this server-side (sampling is
+# left to the client/proxy). Included here as the model card's recommendation
+# if you want it pinned at the server instead.
+override-generation-config:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 20
+  min_p: 0.0
+  presence_penalty: 0.0
+  repetition_penalty: 1.0
+
+# ── Chat Template ──────────────────────────────────────────────────────────
+default-chat-template-kwargs:
+  reasoning_effort: medium
+  preserve_thinking: true
+  enable_thinking: true
+
+chat-template: /configs/Qwen/Qwen3.8_chat_template.jinja

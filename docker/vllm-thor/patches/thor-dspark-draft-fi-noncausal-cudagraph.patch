@@ -1,0 +1,122 @@
+diff --git a/vllm/v1/attention/backends/flashinfer.py b/vllm/v1/attention/backends/flashinfer.py
+--- a/vllm/v1/attention/backends/flashinfer.py
++++ b/vllm/v1/attention/backends/flashinfer.py
+@@ -743,6 +743,20 @@
+             self._decode_wrappers_cudagraph: dict[
+                 tuple[int, int], BatchDecodeWithPagedKVCacheWrapper
+             ] = {}
++            # Thor: a non-causal multi-token drafter (DSpark/DSpark draft) runs
++            # its draft through the FI *prefill* wrapper. In cuda-graph mode
++            # that wrapper freezes its batch size at creation and reads its
++            # KV plan from persistent buffers, so one wrapper per captured
++            # batch size is needed (mirrors _decode_wrappers_cudagraph). The
++            # draft plans eagerly outside the captured graph and the captured
++            # run() reads these stable buffers -- replay-safe (verified by
++            # kernel_test_dspark_draft_nonncausal.py).
++            self._noncausal_prefill_wrappers_cudagraph: dict[
++                int, BatchPrefillWithPagedKVCacheWrapper
++            ] = {}
++            self._nc_prefill_qo_indptr_buf = torch.zeros(
++                max_num_reqs + 1, dtype=torch.int32, device=device
++            )
+             self._decode_cudagraph_max_bs = (1 + num_spec_tokens) * max_num_reqs
+             if self.compilation_config.max_cudagraph_capture_size is not None:
+                 self._decode_cudagraph_max_bs = min(
+@@ -1041,6 +1055,25 @@
+         if (
+             flashinfer_supports_uniform_multi_token_decode()
+             and not use_non_causal
++        ):
++            return AttentionCGSupport.UNIFORM_BATCH
++        # Thor: a non-causal multi-token drafter (DSpark/DSpark draft) routes
++        # through the FI *prefill* wrapper, which plans eagerly outside the
++        # captured graph and is replay-safe (see
++        # _get_noncausal_prefill_wrapper_cudagraph). The FI *decode* wrapper
++        # cannot express non-causal multi-token (its fa2 kernel is
++        # block-causal only for q_len_per_req > 1), so we do not use it here.
++        # Grant UNIFORM_BATCH so the dflash speculator captures FULL draft
++        # graphs instead of running the draft eagerly. Gated on a multi-token
++        # drafter being configured (the drafter is the only non-causal
++        # consumer), single-rank (no DCP), and a non-XQA arch (XQA archs get
++        # their non-causal UNIFORM_BATCH from the mask-based path above).
++        if (
++            vllm_config.attention_config.use_non_causal
++            and not is_xqa_arch
++            and vllm_config.parallel_config.decode_context_parallel_size == 1
++            and vllm_config.speculative_config is not None
++            and (vllm_config.speculative_config.num_speculative_tokens or 0) > 0
+         ):
+             return AttentionCGSupport.UNIFORM_BATCH
+         return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+@@ -1229,6 +1262,39 @@
+                     )
+         assert self._prefill_wrapper is not None
+         return self._prefill_wrapper
++
++    def _get_noncausal_prefill_wrapper_cudagraph(
++        self, batch_size: int
++    ) -> BatchPrefillWithPagedKVCacheWrapper:
++        """A per-batch-size, cuda-graph-mode non-causal prefill wrapper for the
++        multi-token draft (DSpark/DSpark draft).
++
++        In cuda-graph mode the FlashInfer prefill wrapper freezes its batch
++        size at creation and reads its KV plan from *persistent* buffers, so a
++        captured run() replays against stable addresses. The draft plans
++        eagerly (outside the captured graph, each step) and only the attention
++        run is captured, so the wrapper must hold persistent buffers. One
++        wrapper is needed per captured batch size, mirroring
++        _decode_wrappers_cudagraph. This is what makes the non-causal draft
++        capture-safe (see get_cudagraph_support's non-causal UNIFORM_BATCH
++        grant and kernel_test_dspark_draft_nonncausal.py).
++        """
++        wrapper = self._noncausal_prefill_wrappers_cudagraph.get(batch_size)
++        if wrapper is None:
++            wrapper = BatchPrefillWithPagedKVCacheWrapper(
++                self._get_workspace_buffer(),
++                get_flashinfer_layout_string(self.kv_cache_layout),
++                use_cuda_graph=True,
++                qo_indptr_buf=self._nc_prefill_qo_indptr_buf[: batch_size + 1],
++                paged_kv_indptr_buf=self.paged_kv_indptr.gpu[: batch_size + 1],
++                paged_kv_indices_buf=self.paged_kv_indices,
++                paged_kv_last_page_len_buf=self.paged_kv_last_page_len.gpu[
++                    :batch_size
++                ],
++                backend="auto",
++            )
++            self._noncausal_prefill_wrappers_cudagraph[batch_size] = wrapper
++        return wrapper
+ 
+     def _get_decode_wrapper(
+         self, batch_size: int, use_cudagraph: bool = False, q_len_per_req: int = 1
+@@ -1613,7 +1679,30 @@
+                     max_seq_len=max_seq_len,
+                 )
+             else:
+-                prefill_wrapper = self._get_prefill_wrapper(causal=attn_metadata.causal)
++                # Thor: the non-causal multi-token drafter (DSpark/DSpark draft)
++                # is a uniform, per-request-equal batch. Under FULL cudagraph it
++                # must run through a cuda-graph-mode prefill wrapper whose KV
++                # plan lives in persistent buffers, so the captured run() is
++                # replay-safe. A single-token or ragged non-causal batch keeps
++                # the eager (non-cuda-graph) wrapper, exactly as before.
++                use_nc_cudagraph = (
++                    self.enable_cuda_graph
++                    and not self.use_dcp
++                    and not self.is_kvcache_nvfp4
++                    and not attn_metadata.causal
++                    and num_prefills > 0
++                    and num_prefills == num_reqs
++                    and num_prefill_tokens % num_prefills == 0
++                    and num_prefill_tokens // num_prefills > 1
++                )
++                if use_nc_cudagraph:
++                    prefill_wrapper = (
++                        self._get_noncausal_prefill_wrapper_cudagraph(num_prefills)
++                    )
++                else:
++                    prefill_wrapper = self._get_prefill_wrapper(
++                        causal=attn_metadata.causal
++                    )
+                 # Slicing CPU buffers that are only needed for FI native prefills
+                 paged_kv_last_page_len_prefill_cpu = self.paged_kv_last_page_len.cpu[
+                     prefill_start:num_reqs

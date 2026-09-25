@@ -1,0 +1,167 @@
+{
+  "env": {
+    "device": "NVIDIA Thor",
+    "capability": [
+      11,
+      0
+    ],
+    "sms": 20,
+    "torch": "2.13.0+cu130",
+    "interface_sha256": "2d185aa67af1b910ce427067a0a2a63f5a107b27e8bfab9aa2862c14fc6d337c",
+    "gemv_sha256": "bce007fb6f892d78df0c6dc77c3609fd116c16992cf9d15dd9c44c4ef399e766",
+    "L": 8192,
+    "warmup": 20,
+    "iters": 300,
+    "kv_bytes": 16777216,
+    "roofline_bw_bytes_per_s": 273000000000.0,
+    "gate": {
+      "poll_s": 2.0,
+      "confirm_00_streak": 6
+    }
+  },
+  "window": {
+    "start": 1790337779.4872322,
+    "end": 1790337781.0912008,
+    "clean": true,
+    "num_samples": 1,
+    "dirty_samples": [],
+    "server_load_before_wait": [
+      0.0,
+      0.0
+    ],
+    "server_load_at_end": [
+      0.0,
+      0.0
+    ]
+  },
+  "results": {
+    "st16_ns1": {
+      "median": 1305.44,
+      "p95": 1349.088,
+      "min": 1292.576,
+      "mean": 1312.488,
+      "iters": 300,
+      "bw_gbs_nominal_kv": 12.85
+    },
+    "st16_ns4": {
+      "median": 365.776,
+      "p95": 394.88,
+      "min": 325.664,
+      "mean": 372.194,
+      "iters": 300,
+      "bw_gbs_nominal_kv": 45.87
+    },
+    "st16_ns8": {
+      "median": 316.16,
+      "p95": 351.744,
+      "min": 273.824,
+      "mean": 323.848,
+      "iters": 300,
+      "bw_gbs_nominal_kv": 53.07
+    },
+    "st16_ns20": {
+      "median": 222.8,
+      "p95": 240.256,
+      "min": 180.32,
+      "mean": 224.639,
+      "iters": 300,
+      "bw_gbs_nominal_kv": 75.3
+    },
+    "st16_ns64": {
+      "median": 233.52,
+      "p95": 245.504,
+      "min": 194.56,
+      "mean": 235.113,
+      "iters": 300,
+      "bw_gbs_nominal_kv": 71.84
+    },
+    "st16_auto": {
+      "median": 224.192,
+      "p95": 240.64,
+      "min": 218.88,
+      "mean": 226.739,
+      "iters": 300,
+      "bw_gbs_nominal_kv": 74.83
+    },
+    "st2_ns1": {
+      "median": 1277.696,
+      "p95": 1326.112,
+      "min": 1265.664,
+      "mean": 1284.034,
+      "iters": 300,
+      "bw_gbs_nominal_kv": 13.13
+    },
+    "st2_ns20": {
+      "median": 221.424,
+      "p95": 248.8,
+      "min": 212.064,
+      "mean": 225.411,
+      "iters": 300,
+      "bw_gbs_nominal_kv": 75.77
+    },
+    "flashinfer": {
+      "median": 202.048,
+      "p95": 245.92,
+      "min": 179.392,
+      "mean": 210.185,
+      "iters": 300,
+      "bw_gbs_nominal_kv": 83.04
+    }
+  },
+  "ncu": {
+    "convention": "achieved_bw_gbs = lts__t_sectors.sum * 32B / gpu__time_duration.sum (L2-fabric BW, same convention as gemv-fi-gap-final.md); dram__bytes.sum is n/a on CC 11.0",
+    "options": [
+      "--clock-control none",
+      "--cache-control none",
+      "--privileged (counter perms)"
+    ],
+    "launches_profiled_per_point": 4,
+    "vllm_load_per_point": {
+      "st16_ns1": "1.0 running (agent inference; point insensitive to vLLM co-tenancy per gemv-fi-gap-final.md sec.4; rerun 1.27-1.28 ms identical)",
+      "st16_ns20": "0.0/0.0 clean (rerun)",
+      "st16_ns64": "0.0/0.0",
+      "st2_ns1": "0.0/0.0",
+      "st2_ns20": "0.0/0.0"
+    },
+    "st16_ns1": {
+      "kernel_us": 1270.0,
+      "lts_sectors": 537699,
+      "achieved_bw_gbs": 13.55,
+      "smem_dynamic_kb": 49.15
+    },
+    "st16_ns20": {
+      "kernel_us": 179.58,
+      "lts_sectors": 664130,
+      "achieved_bw_gbs": 118.3,
+      "smem_dynamic_kb": 49.15
+    },
+    "st16_ns64": {
+      "kernel_us": 183.2,
+      "lts_sectors": 965192,
+      "achieved_bw_gbs": 168.6,
+      "smem_dynamic_kb": 49.15
+    },
+    "st2_ns1": {
+      "kernel_us": 1250.0,
+      "lts_sectors": 532957,
+      "achieved_bw_gbs": 13.64,
+      "smem_dynamic_kb": 6.14
+    },
+    "st2_ns20": {
+      "kernel_us": 174.7,
+      "lts_sectors": 571668,
+      "achieved_bw_gbs": 104.7,
+      "smem_dynamic_kb": 6.14
+    }
+  },
+  "verification": {
+    "st16_vs_fp32_ref": {
+      "L5": "max_abs 7.7e-3 GO",
+      "L128": "max_abs 1.9e-3 GO",
+      "L8192": "max_abs 2.4e-4 GO"
+    },
+    "st16_vs_st2": "bit-identical (max_abs 0.0) at L=5/128/8192",
+    "original_verify": "15/15 pass with stages=16 default",
+    "auto_ns_at_L8192": "20 -> 80 CTAs"
+  }
+}

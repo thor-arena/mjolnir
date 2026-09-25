@@ -1,0 +1,104 @@
+model: QUASAR-QAT/Qwen3.8-27B-QUASAR-NVFP4
+served-model-name: Qwen/Qwen3.8-27B
+
+dtype: bfloat16
+
+performance-mode: throughput
+optimization-level: 3
+compilation-config:
+  cudagraph_num_of_warmups: 5
+  custom_ops:
+    - +rotary_embedding
+  pass_config:
+    eliminate_noops: true
+    fuse_allreduce_rms: false
+
+disable-custom-all-reduce: true
+trust-remote-code: true
+enforce-eager: false
+
+max-num-seqs: 10
+max-model-len: 200K
+max-num-batched-tokens: 16K
+gpu-memory-utilization: 0.88
+
+enable-auto-tool-choice: true
+tool-call-parser: qwen3_coder
+reasoning-parser: qwen3
+
+# ── Attention / linear backends ─────────────────────────────────────────────
+# NVFP4_14_FA4hd256 — the ONLY change vs NVFP4_9 is the attention opt-in below.
+#
+# NVFP4_9 used `attention-backend: flashinfer` (top-level), which forced ALL 16
+# full-attention (head_dim=256) layers onto FlashInfer — FA4 could never serve them
+# because sm_110 defaults to FA2 and the Blackwell hd256 kernel was downgraded on FP8 KV.
+# Here we replace it with an `attention-config` block (the two are mutually exclusive):
+#   - backend: FLASH_ATTN      -> the 16 full-attn layers resolve to the FA backend
+#   - flash_attn_version: 4    -> the explicit FA4 opt-in. This is REQUIRED: without it
+#                                 sm_110 stays FA2 (passive-by-default gate), and the
+#                                 fa4-hd256 FP8 policy probe is unreachable (its grant is
+#                                 gated on fa_version==4). With it + FP8 KV + head 256,
+#                                 the dedicated 2-CTA hd256 kernel is selected and its
+#                                 one-shot probe validates the FP8 descale path on the box.
+# The 48 GDN (linear-attention) layers are a SEPARATE backend (linear-backend / mamba) and
+# are untouched by this — this is why only the full-attn group changes.
+# attention-backend: flashinfer # replaced by attention-config below (mutually exclusive)
+attention-config:
+  backend: FLASH_ATTN        # target's 16 full-attn layers (hd256) -> FA4 (was FlashInfer)
+  flash_attn_version: 4      # explicit FA4 opt-in (sm_110 defaults to FA2 otherwise)
+enable-flashinfer-autotune: true
+mm-encoder-attn-backend: TORCH_SDPA   # SM110 ViT PTX-crash workaround (vLLM issue #38411)
+linear-backend: auto                  # do NOT hardcode flashinfer-cutlass — that's the RTX5090/SM120 GEMM path, not SM110
+
+# ── KV Cache ─────────────────────────────────────────────────────────────
+# kv-cache-dtype: fp8 == fp8_e4m3 (vLLM aliases fp8->fp8_e4m3; both satisfy
+# is_quantized_kv_cache), so the FP8 KV requirement is already met. No change.
+kv-cache-dtype: fp8   # NVFP4 KV isn't available on SM110 for this arch; FP8 matches the checkpoint's own design (NVFP4 weights, FP8 KV)
+kv-cache-dtype-skip-layers: sliding_window
+mamba-cache-mode: align
+mamba-cache-dtype: bfloat16
+mamba-ssm-cache-dtype: bfloat16
+# No global `block-size` and no `mamba-block-size` — same as NVFP4_9. The FA4 hd256
+# kernel requires page_size==128 (TMA tile_n=128), so its KV group is auto-pinned to
+# 128 by get_supported_kernel_block_sizes when FA4 hd256 is active. The GDN/mamba group
+# resolves its own block size independently (per-group block sizes in the hybrid KV
+# coordinator). No conflicting global size is set, so the two coexist. Verified by the
+# server smoke test's "kv cache group sizes" log line.
+
+# ── Multimodal ─────────────────────────────────────────────────────────────
+language-model-only: true
+mm-encoder-tp-mode: data
+mm-processor-cache-type: shm
+limit-mm-per-prompt:
+  image: 4
+  video: 0
+
+# ── Caching & Scheduling ─────────────────────────────────────────────────
+enable-prefix-caching: true
+enable-chunked-prefill: true
+async-scheduling: true
+
+# ── Speculative Decoding — MTP (built-in head), K=3 ─────────────────────
+speculative-config:
+  method: mtp
+  num_speculative_tokens: 3
+
+# ── Generation defaults (Qwen3.8 card's documented Thinking-mode preset) ────
+# NOTE: the verified Thor launch args do not set this server-side (sampling is
+# left to the client/proxy). Included here as the model card's recommendation
+# if you want it pinned at the server instead.
+override-generation-config:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 20
+  min_p: 0.0
+  presence_penalty: 0.0
+  repetition_penalty: 1.0
+
+# ── Chat Template ──────────────────────────────────────────────────────────
+default-chat-template-kwargs:
+  reasoning_effort: medium
+  preserve_thinking: true
+  enable_thinking: true
+
+chat-template: /configs/Qwen/Qwen3.8_chat_template.jinja

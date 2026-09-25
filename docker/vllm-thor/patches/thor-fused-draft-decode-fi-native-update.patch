@@ -1,0 +1,152 @@
+diff --git a/vllm/v1/attention/backends/flashinfer.py b/vllm/v1/attention/backends/flashinfer.py
+--- a/vllm/v1/attention/backends/flashinfer.py
++++ b/vllm/v1/attention/backends/flashinfer.py
+@@ -934,6 +934,24 @@
+         self.paged_kv_last_page_len = CpuGpuBuffer(
+             max_num_reqs, dtype=torch.int32, device=self.device, pin_memory=False
+         )
++        # The trtllm-gen / XQA decode reads its block table and seq lens from
++        # the live persistent GPU buffers (advanced in place between draft
++        # steps), so it needs no update. Only the FI native decode plan
++        # (paged_kv_*) must be re-derived in place, and only for a full-
++        # cudagraph, single-rank, non-DCP builder (the trtllm flag identifies
++        # the non-native decode path). Gated further in
++        # update_draft_decode_metadata() to the pure uniform single-token
++        # decode case.
++        self.supports_draft_decode_metadata_update = (
++            self.enable_cuda_graph
++            and self.dcp_world_size == 1
++            and not self.use_trtllm_decode_attention
++        )
++        # Persistent live references to the draft decode's advancing GPU
++        # buffers, captured at build() so update_draft_decode_metadata can
++        # re-derive the plan during CUDA graph capture.
++        self._draft_seq_lens_gpu: torch.Tensor | None = None
++        self._draft_block_table: torch.Tensor | None = None
+ 
+     @property
+     def kv_cache_layout(self) -> KVCacheLayout:
+@@ -1315,6 +1333,10 @@
+         num_reqs = common_attn_metadata.num_reqs
+         num_actual_tokens = common_attn_metadata.num_actual_tokens
+         causal = common_attn_metadata.causal
++        # Remember the live, advancing GPU buffers so the fused draft-decode
++        # loop can re-derive the decode KV plan in place between steps.
++        self._draft_seq_lens_gpu = common_attn_metadata.seq_lens
++        self._draft_block_table = common_attn_metadata.block_table_tensor
+         route_decode = causal or self.use_xqa
+         if route_decode:
+             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+@@ -1796,6 +1818,49 @@
+                 )
+                 attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
+         return attn_metadata
++
++    def update_draft_decode_metadata(self, metadata: FlashInferMetadata) -> None:
++        # The trtllm-gen / XQA decode path reads its block table and seq lens
++        # from the live persistent GPU buffers (advanced in place between
++        # draft steps by the slot machinery), so it needs no update. Only the
++        # FI native decode plan (paged_kv_indptr / indices / last_page_len)
++        # must be re-derived in place here.
++        if not isinstance(metadata.decode, FIDecode):
++            return
++        # The fused draft-decode loop only advances a pure, uniform
++        # single-token decode; anything else must not silently reuse a stale
++        # plan.
++        if (
++            metadata.num_prefills != 0
++            or metadata.num_decodes == 0
++            or metadata.num_decode_tokens != metadata.num_decodes
++        ):
++            logger.warning_once(
++                "Fused draft decode is expected to be a uniform single-token "
++                "decode; the FlashInfer decode plan will not be advanced in "
++                "place for this step."
++            )
++            return
++        if self._draft_seq_lens_gpu is None or self._draft_block_table is None:
++            return
++        # Re-derive the decode plan on the GPU from the advancing seq lens.
++        # This mirrors the exact formula of _compute_flashinfer_kv_metadata,
++        # so the result equals what a fresh build() would compute for the
++        # advanced seq lens -- but entirely in persistent GPU buffers, which
++        # is what the captured CUDA graph requires (no host copies, no
++        # device-to-device index copy, no Python recompute at replay).
++        num_reqs = metadata.num_decodes
++        _advance_fi_decode_plan_kernel[(num_reqs,)](
++            self._draft_seq_lens_gpu,
++            self._draft_block_table,
++            self._draft_block_table.stride(0),
++            self.paged_kv_indptr.gpu,
++            self.paged_kv_last_page_len.gpu,
++            self.paged_kv_indices,
++            self.page_size,
++            BLOCK_SIZE=1024,
++            num_warps=4,
++        )
+ 
+     def use_cascade_attention(self, *args, **kwargs) -> bool:
+         if self.kv_cache_spec.dtype != self.vllm_config.model_config.dtype:
+@@ -2787,3 +2852,62 @@
+             block_ids,
+             mask=i + offset < num_blocks,
+         )
++
++
++@triton.jit
++def _advance_fi_decode_plan_kernel(
++    seq_lens,  # [num_reqs] int32, live (already advanced to this draft step)
++    block_table,  # [num_reqs, max_blocks] int32, live
++    block_table_stride,
++    indptr,  # [num_reqs + 1] int32, out (cumulative block counts)
++    last_page_len,  # [num_reqs] int32, out (tokens in each req's last page)
++    page_indices,  # [max_pages] int32, out (block ids in plan order)
++    page_size: tl.constexpr,
++    BLOCK_SIZE: tl.constexpr,
++):
++    # One program per request. Re-derives the FlashInfer native decode plan
++    # (paged_kv_indptr / last_page_len / page_indices) for a single decode
++    # step from the request's KV length (seq_lens[req]) and its live block
++    # table. This is the same computation build() does in
++    # _compute_flashinfer_kv_metadata, but on the GPU from the advancing
++    # seq_lens so the fused draft-decode loop can advance the plan between
++    # steps without a host sync or a full rebuild.
++    req_idx = tl.program_id(0)
++    seq_len = tl.load(seq_lens + req_idx)
++    # Two independent quantities, exactly as build()'s
++    # _compute_flashinfer_kv_metadata computes them:
++    #   num_blocks  = ceil(seq_len / page_size)   (0 for an empty request)
++    #   last_page_len = seq_len % page_size, promoted to page_size when a
++    #                   non-empty request lands exactly on a page boundary.
++    if seq_len == 0:
++        num_blocks = 0
++        last_len = 0
++    else:
++        num_blocks = (seq_len + page_size - 1) // page_size
++        last_len = seq_len % page_size
++        if last_len == 0:
++            last_len = page_size
++
++    # The base of this request's page range is the total block count of all
++    # earlier requests. Re-derive it from the read-only seq_lens (not from
++    # indptr, which this same launch is concurrently overwriting) so each
++    # program is independent of the others. num_reqs is small, so the
++    # prefix sum is cheap; it runs on every draft step but is O(num_reqs).
++    base = 0
++    for i in range(0, req_idx):
++        other_len = tl.load(seq_lens + i)
++        other_full = other_len // page_size
++        other_last = other_len - other_full * page_size
++        other_blocks = other_full + (other_last > 0)
++        if other_len == 0:
++            other_blocks = 0
++        base += other_blocks
++
++    tl.store(indptr + req_idx + 1, base + num_blocks)
++    tl.store(last_page_len + req_idx, last_len)
++
++    row_ptr = block_table + req_idx * block_table_stride
++    for i in tl.range(0, num_blocks, BLOCK_SIZE):
++        offset = i + tl.arange(0, BLOCK_SIZE)
++        block_ids = tl.load(row_ptr + offset, mask=offset < num_blocks)
++        tl.store(page_indices + base + offset, block_ids, mask=offset < num_blocks)

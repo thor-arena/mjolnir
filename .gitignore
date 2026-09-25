@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+.mjolnir-state.json
+data/
+runs/
+benchmarks/raw/*
+!benchmarks/raw/gemv-ring-fix-bench.json
+!benchmarks/raw/decode-microbench-results.json
+vfa-tree/

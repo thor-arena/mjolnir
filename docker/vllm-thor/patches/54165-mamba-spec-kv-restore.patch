@@ -1,0 +1,29 @@
+diff --git a/vllm/config/speculative.py b/vllm/config/speculative.py
+--- a/vllm/config/speculative.py
++++ b/vllm/config/speculative.py
+@@ -1919,9 +1919,23 @@
+         # TODO(ben): Refactor this so the naming is clearer
+         return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+ 
++    def use_eagle_preserves_target_kv_cache(self) -> bool:
++        # Only eagle-family drafters share (and pollute via lookahead KV
++        # write) the target's full-attention KV cache groups; DFlash/DSpark
++        # draft from their own KV cache and never write target blocks.
++        return self.method in ("eagle", "eagle3", "mtp")
++
+     def use_eagle_block_drop(self) -> bool:
+-        """Whether volatile trailing cache blocks should be discarded."""
+-        return self.use_eagle() and not self.disable_eagle_block_drop
++        """Whether volatile trailing cache blocks should be discarded.
++
++        Only eagle-family drafters that preserve (i.e. pollute) the target's
++        full-attention KV cache need this drop; DFlash/DSpark draft from their
++        own cache and never write target blocks.
++        """
++        return (
++            self.use_eagle_preserves_target_kv_cache()
++            and not self.disable_eagle_block_drop
++        )
+ 
+     def use_dflash(self) -> bool:
+         return self.method == "dflash"

@@ -1,0 +1,184 @@
+diff --git a/vllm/v1/attention/backends/flashinfer.py b/vllm/v1/attention/backends/flashinfer.py
+--- a/vllm/v1/attention/backends/flashinfer.py
++++ b/vllm/v1/attention/backends/flashinfer.py
+@@ -2,10 +2,12 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ """Attention layer with FlashInfer."""
+ 
++import inspect
++
+ from dataclasses import dataclass, replace
+ from enum import Enum
+-from functools import partial
+-from typing import ClassVar
++from functools import cache, partial
++from typing import Any, ClassVar
+ 
+ import numpy as np
+ import torch
+@@ -735,10 +737,11 @@
+             self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+         )
+         if self.enable_cuda_graph:
+-            # For full cudagraph capture, one `decode_wrapper` for each batch
+-            # size is needed for FlashInfer.
++            # For full cudagraph capture, one `decode_wrapper` for each
++            # (batch_size, q_len_per_req) pair is needed for FlashInfer,
++            # because plan() freezes q_len_per_req at planning time.
+             self._decode_wrappers_cudagraph: dict[
+-                int, BatchDecodeWithPagedKVCacheWrapper
++                tuple[int, int], BatchDecodeWithPagedKVCacheWrapper
+             ] = {}
+             self._decode_cudagraph_max_bs = (1 + num_spec_tokens) * max_num_reqs
+             if self.compilation_config.max_cudagraph_capture_size is not None:
+@@ -870,6 +873,12 @@
+             1,
+             supports_spec_as_decode=(
+                 self.flashinfer_trtllm_api_decode_kernel is not None
++                # The FI native decode wrapper can plan uniform multi-token
++                # queries (verify batches) when FlashInfer is new enough.
++                or (
++                    not self.use_trtllm_decode_attention
++                    and flashinfer_supports_uniform_multi_token_decode()
++                )
+             ),
+             # trtllm-gen decode receives no cp_rank/global-seq-len information,
+             # so its end-aligned causal mask is wrong for q_len > 1 over the
+@@ -1008,8 +1017,15 @@
+         use_non_causal = vllm_config.attention_config.use_non_causal
+         if has_uniform_batch_support and (not use_non_causal or is_xqa_arch):
+             return AttentionCGSupport.UNIFORM_BATCH
+-        else:
+-            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
++        # The trtllm/XQA uniform-batch path is unavailable here (e.g. SM110);
++        # with a new enough FlashInfer, uniform spec-decode verify batches
++        # capture FULL graphs via the FI native tensor-core path (causal).
++        if (
++            flashinfer_supports_uniform_multi_token_decode()
++            and not use_non_causal
++        ):
++            return AttentionCGSupport.UNIFORM_BATCH
++        return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+ 
+     def _get_workspace_buffer(self):
+         if self._workspace_buffer is None:
+@@ -1196,9 +1212,12 @@
+         assert self._prefill_wrapper is not None
+         return self._prefill_wrapper
+ 
+-    def _get_decode_wrapper(self, batch_size: int, use_cudagraph: bool = False):
++    def _get_decode_wrapper(
++        self, batch_size: int, use_cudagraph: bool = False, q_len_per_req: int = 1
++    ):
+         if use_cudagraph:
+-            decode_wrapper = self._decode_wrappers_cudagraph.get(batch_size, None)
++            cache_key: tuple[int, int] = (batch_size, q_len_per_req)
++            decode_wrapper = self._decode_wrappers_cudagraph.get(cache_key, None)
+         else:
+             decode_wrapper = self._decode_wrapper
+ 
+@@ -1230,7 +1249,7 @@
+ 
+             # save the decode wrapper
+             if use_cudagraph:
+-                self._decode_wrappers_cudagraph[batch_size] = decode_wrapper
++                self._decode_wrappers_cudagraph[cache_key] = decode_wrapper
+             else:
+                 self._decode_wrapper = decode_wrapper
+ 
+@@ -1711,10 +1730,18 @@
+                     and pure_decode
+                     and num_decode_tokens <= self._decode_cudagraph_max_bs
+                 )
+-                num_input_tokens = num_decode_tokens
++                # Spec-as-decode verify batches carry a uniform
++                # num_decode_tokens // num_decodes tokens per request; the
++                # wrapper's batch size and kv metadata are per request.
++                assert num_decode_tokens % num_decodes == 0, (
++                    f"Expected num_decode_tokens ({num_decode_tokens}) to be"
++                    f" divisible by num_decodes ({num_decodes}) for uniform"
++                    f" spec-decode verify batches"
++                )
++                decode_q_len = num_decode_tokens // num_decodes
+ 
+                 decode_wrapper = self._get_decode_wrapper(
+-                    num_input_tokens, use_cudagraph
++                    num_decodes, use_cudagraph, q_len_per_req=decode_q_len
+                 )
+                 # Use the persistent buffer with padding length,
+                 # instead of the same address but chunked version
+@@ -1725,9 +1752,9 @@
+                 o_dtype = (
+                     FP8_DTYPE if self.is_kvcache_nvfp4 else self.model_config.dtype
+                 )
+-                paged_kv_indptr_cpu = self.paged_kv_indptr.cpu[: num_input_tokens + 1]
++                paged_kv_indptr_cpu = self.paged_kv_indptr.cpu[: num_decodes + 1]
+                 paged_kv_last_page_len_cpu = self.paged_kv_last_page_len.cpu[
+-                    :num_input_tokens
++                    :num_decodes
+                 ]
+                 # plan() copies these to the GPU with non_blocking=True;
+                 # stage them in pinned memory so the copies stay async
+@@ -1765,6 +1792,7 @@
+                     o_data_type=o_dtype,
+                     fixed_split_size=self.decode_fixed_split_size,
+                     disable_split_kv=self.disable_split_kv,
++                    q_len_per_req=decode_q_len,
+                 )
+                 attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
+         return attn_metadata
+@@ -2620,6 +2648,14 @@
+             )
+ 
+ 
++@cache
++def flashinfer_supports_uniform_multi_token_decode() -> bool:
++    """Whether the installed FlashInfer can plan the tensor-core decode path
++    for a uniform q_len_per_req > 1 (spec-decode verify) and keep the plan
++    cudagraph-safe."""
++    return "q_len_per_req" in inspect.signature(fast_decode_plan).parameters
++
++
+ def fast_plan_decode(
+     self,  # decode wrapper
+     indptr_cpu: torch.Tensor,
+@@ -2643,6 +2679,7 @@
+     non_blocking: bool = True,
+     fixed_split_size: int = -1,
+     disable_split_kv: bool = False,
++    q_len_per_req: int = 1,
+ ) -> None:
+     """A faster version of BatchDecodeWithPagedKVCacheWrapper::plan used for
+     cudagraph capture/replay, while the no cudagraph version turns back
+@@ -2656,6 +2693,15 @@
+     Part of the code get inspiration from the original plan from FlashInfer repo
+     and the implementation of fast_decode_plan for FlashInfer in SGlang repo.
+     """
++    supports_uniform_multi_token = flashinfer_supports_uniform_multi_token_decode()
++    if q_len_per_req > 1 and not supports_uniform_multi_token:
++        raise RuntimeError(
++            "The installed FlashInfer does not support uniform multi-token decode."
++        )
++    uniform_decode_kwargs: dict[str, Any] = {}
++    if supports_uniform_multi_token:
++        uniform_decode_kwargs["q_len_per_req"] = q_len_per_req
++
+     # Warm up with the original plan if it is first call, and always run the
+     # original plan if we run for dynamic shape. For fixed shape (cudagraph),
+     # this warm up is to generate the _cached_module for the decode wrapper.
+@@ -2687,6 +2733,7 @@
+             seq_lens=seq_lens_cpu,
+             fixed_split_size=fixed_split_size,
+             disable_split_kv=disable_split_kv,
++            **uniform_decode_kwargs,
+         )
+         self.vllm_first_call = False
+         return
+@@ -2714,6 +2761,7 @@
+         non_blocking=non_blocking,
+         fixed_split_size=fixed_split_size,
+         disable_split_kv=disable_split_kv,
++        **uniform_decode_kwargs,
+     )
+ 
+ 

@@ -1,0 +1,236 @@
+--- a/vllm/vllm_flash_attn/cute/interface.py
++++ b/vllm/vllm_flash_attn/cute/interface.py
+@@ -61,6 +61,7 @@
+ # SM100 dedicated head_dim=256 kernel imports
+ from vllm.vllm_flash_attn.cute.sm100_hd256_2cta_fmha_forward import BlackwellFusedMultiHeadAttentionForward
+ from vllm.vllm_flash_attn.cute.sm100_hd256_2cta_fmha_backward import BlackwellFusedMultiHeadAttentionBackward
++from vllm.vllm_flash_attn.cute.sm100_hd256_decode_gemv import BlackwellHd256DecodeGEMV
+ 
+ from vllm.vllm_flash_attn.cute.utils import AuxData
+ from vllm.vllm_flash_attn.cute.block_sparsity import (
+@@ -357,6 +358,20 @@
+     return min(num_SMs // total_mblocks, max_splits, num_n_blocks)
+ 
+ 
++def _gemv_auto_num_splits(num_kv_heads: int, batch_size: int, device, arch: int) -> int:
++    """FlashInfer Alg.1 split-KV plan for the GEMV decode kernel
++    (flashinfer/attention/scheduler.cuh:176-187): pick ``num_splits`` so the
++    grid ``(num_kv_heads, num_splits, batch)`` fills up to
++    ``max_grid = blocks_per_sm * #SM`` CTAs. The 128-row kv-chunk floor is
++    applied by the caller. ``blocks_per_sm`` is a conservative occupancy
++    estimate for the 96-thread GEMV CTA (~100 regs, ~6 KiB smem -> 4-6
++    resident CTAs/SM; 4 keeps the partial-write traffic small)."""
++    num_SMs = get_num_sms_for_selection(device.index, arch)
++    blocks_per_sm = 4
++    max_grid = num_SMs * blocks_per_sm
++    return max(1, (max_grid + num_kv_heads * batch_size - 1) // (num_kv_heads * batch_size))
++
++
+ def _get_fwd_config(
+     *,
+     arch: int,
+@@ -760,7 +775,20 @@
+         input_tensors = {"q": q, "k": k, "v": v, "qv": qv}
+         present = {name: t for name, t in input_tensors.items() if t is not None}
+         names = list(present.keys())
+-                assert present[a].dtype == present[b].dtype, f"{a}.dtype {present[a].dtype} != {b}.dtype {present[b].dtype}"
++        # The GEMV decode knob (VLLM_FA4_HD256_GEMV=1) allows mixed Q/KV dtypes
++        # (bf16/fp16 Q with fp8 KV) for the M=1 hd256 shape only.
++        _gemv_dtype_ok = (
++            os.environ.get("VLLM_FA4_HD256_GEMV", "0") == "1"
++            and head_dim == 256
++            and max_seqlen_q == 1
++            and all(
++                t.dtype in (torch.bfloat16, torch.float16, torch.float8_e4m3fn)
++                for t in present.values()
++            )
++        )
++        for i in range(len(names)):
++            for j in range(i + 1, len(names)):
++                a, b = names[i], names[j]
+                 assert present[a].dtype == present[b].dtype or _gemv_dtype_ok, f"{a}.dtype {present[a].dtype} != {b}.dtype {present[b].dtype}"
+ 
+     q_dtype = q.dtype if q is not None else qv.dtype
+@@ -939,6 +967,182 @@
+     if cu_seqlens_k is None and seqused_k is None:
+         min_seqlen_k = seqlen_k
+ 
++    # GEMV decode kernel (Phase A, env-gated — default off): pure-FMA GEMV for
++    # M=1 dense/varlen decode on SM100/SM110 (docs/fa4-hd256-fp8/gemv-decode-
++    # design.md). Bypasses the tcgen05/1CTA path entirely; see the doc for the
++    # full scope gates.
++    use_gemv_hd256 = (
++        os.environ.get("VLLM_FA4_HD256_GEMV", "0") == "1"
++        and arch // 10 in [10, 11]
++        and head_dim == 256
++        and head_dim_v == 256
++        and max_seqlen_q == 1
++        and k is not None
++        and k.dtype == v.dtype
++        and q.dtype in (torch.bfloat16, torch.float16, torch.float8_e4m3fn)
++        and v.dtype in (torch.bfloat16, torch.float16, torch.float8_e4m3fn)
++        # Phase B1: dense or paged (page_size 16/128) KV; SplitKV (num_splits>1)
++        # is handled by the GEMV grid's y axis + the in-tree combine.
++        and (page_table is None or page_size in (16, 128))
++        and seqused_q is None
++        and seqused_k is None
++        and dynamic_causal is None
++        and softcap is None
++        and learnable_sink is None
++        and block_sparse_tensors is None
++        and gather_kv_indices is None
++        and aux_tensors is None
++        and mask_mod is None
++        and score_mod is None
++        and qv is None
++        and output_scale is None
++        and not fp8_kv_dequant
++    )
++    if use_gemv_hd256:
++        # ---- SplitKV plan (Phase B1, FlashInfer Alg.1) ----------------------
++        # Precedence: VLLM_FA4_HD256_GEMV_NUM_SPLITS env knob (>=1; 1 forces
++        # the write-through path) > caller num_splits > auto plan (fill the
++        # SMs). Capped by the 128-row kv-chunk floor (FlashInfer's
++        # max(128/page_size, 1) page floor at page_size<=128) and the combine
++        # kernel's max splits (64).
++        gemv_ns = num_splits
++        try:
++            gemv_ns_env = int(os.environ.get("VLLM_FA4_HD256_GEMV_NUM_SPLITS", "0"))
++        except ValueError:
++            gemv_ns_env = 0
++        if gemv_ns_env > 0:
++            gemv_ns = gemv_ns_env
++        elif gemv_ns <= 1:
++            gemv_ns = _gemv_auto_num_splits(num_head_kv, batch_size, device, arch)
++        gemv_ns = max(1, min(gemv_ns, 64, (seqlen_k + 127) // 128))
++        gemv_split = gemv_ns > 1
++        gemv_paged = page_table is not None
++        if gemv_split:
++            out_partial = torch.empty(
++                gemv_ns, *q_batch_seqlen_shape, num_head, head_dim_v,
++                dtype=torch.float32, device=device,
++            )
++            lse_partial = torch.empty(
++                gemv_ns, *lse_shape, dtype=torch.float32, device=device,
++            )
++        else:
++            out_partial = None
++            lse_partial = None
++
++        if getattr(_flash_attn_fwd, "gemv_compile_cache", None) is None:
++            _flash_attn_fwd.gemv_compile_cache = {}
++        gemv_cache = _flash_attn_fwd.gemv_compile_cache
++        sm_scale_log2 = softmax_scale * math.log2(math.e)
++        # num_splits itself is a runtime grid value (one split binary serves
++        # every ns); the key captures only the compile-time shape.
++        gemv_key = (
++            qhead_per_kvhead,
++            q.dtype,
++            v.dtype,
++            cu_seqlens_q is not None,
++            cu_seqlens_k is not None,
++            lse is not None,
++            q_descale is not None,
++            gemv_split,
++            page_size if gemv_paged else 0,
++        )
++        if gemv_key not in gemv_cache:
++            current_stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
++            gemv_cache[gemv_key] = cute.compile(
++                BlackwellHd256DecodeGEMV(
++                    qhead_per_kvhead,
++                    page_size=page_size if gemv_paged else 0,
++                ),
++                to_cute_tensor(q),
++                to_cute_tensor(k),
++                to_cute_tensor(v),
++                to_cute_tensor(out),
++                to_cute_tensor(lse, assumed_align=4) if lse is not None else None,
++                to_cute_tensor(cu_seqlens_q, assumed_align=4, leading_dim=0)
++                if cu_seqlens_q is not None
++                else None,
++                to_cute_tensor(cu_seqlens_k, assumed_align=4, leading_dim=0)
++                if cu_seqlens_k is not None
++                else None,
++                (
++                    DescaleTensors(
++                        q_descale=to_cute_tensor(q_descale, assumed_align=4, leading_dim=1),
++                        k_descale=to_cute_tensor(k_descale, assumed_align=4, leading_dim=1),
++                        v_descale=to_cute_tensor(v_descale, assumed_align=4, leading_dim=1),
++                    )
++                    if q_descale is not None
++                    else None
++                ),
++                to_cute_tensor(out_partial, assumed_align=4) if gemv_split else None,
++                to_cute_tensor(lse_partial, assumed_align=4) if gemv_split else None,
++                to_cute_tensor(page_table, assumed_align=4, leading_dim=1)
++                if gemv_paged
++                else None,
++                seqlen_q if cu_seqlens_q is None else 0,
++                seqlen_k,
++                sm_scale_log2,
++                gemv_ns,
++                current_stream,
++                options="--enable-tvm-ffi",
++            )
++        if not fake_mode:
++            q_call = q.detach()
++            k_call = k.detach()
++            v_call = v.detach()
++            # FP8 FFI workaround (same as the fp8 paths below): pass as uint8.
++            if q.dtype in (torch.float8_e4m3fn,):
++                q_call = q_call.view(torch.uint8)
++            if v.dtype in (torch.float8_e4m3fn,):
++                k_call = k_call.view(torch.uint8)
++                v_call = v_call.view(torch.uint8)
++            descale_tensors = (
++                DescaleTensors(
++                    q_descale=q_descale, k_descale=k_descale, v_descale=v_descale
++                )
++                if q_descale is not None
++                else None
++            )
++            if os.environ.get("VLLM_FA4_HD256_GEMV_DEBUG", "0") == "1":
++                _gkv = (seqlen_k + gemv_ns - 1) // gemv_ns if gemv_ns else 0
++                import sys as _sys
++                print(
++                    f"[GEMV-DBG] ns={gemv_ns} split={gemv_split} "
++                    f"grid=({num_head_kv},{gemv_ns},{batch_size}) "
++                    f"kv_len_c~{_gkv} L={seqlen_k} "
++                    f"key_split={gemv_split} cached={gemv_key in gemv_cache}",
++                    file=_sys.stderr, flush=True,
++                )
++            gemv_cache[gemv_key](
++                q_call,
++                k_call,
++                v_call,
++                out.detach(),
++                lse,
++                cu_seqlens_q,
++                cu_seqlens_k,
++                descale_tensors,
++                out_partial if gemv_split else None,
++                lse_partial if gemv_split else None,
++                page_table if gemv_paged else None,
++                seqlen_q if cu_seqlens_q is None else 0,
++                seqlen_k,
++                sm_scale_log2,
++                gemv_ns,
++            )
++        # LSE combine (Phase B1 REUSE of the A1b-verified ⊕-merge): the fused
++        # single-kernel reduction (B2) will replace this separate launch.
++        if gemv_split and not fake_mode:
++            _flash_attn_fwd_combine(
++                out_partial,
++                lse_partial.transpose(-1, -2),
++                out,
++                lse.transpose(-1, -2) if lse is not None else None,
++                cu_seqlens_q,
++                seqused_q,
++                _arch=arch,
++            )
++        return out, lse, None, None
++
+     # A1c TEST KNOB (experiment, NOT policy — a real L-threshold policy will
+     # replace it): VLLM_FA4_HD256_DECODE_NUM_SPLITS=N (N>1) requests SplitKV on
+     # the hd256 1CTA decode carve-out (max_seqlen_q<=8, non-local). Default

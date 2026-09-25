@@ -1,0 +1,11 @@
+--- a/flashinfer/gdn_prefill.py
++++ b/flashinfer/gdn_prefill.py
+@@ -457,7 +457,7 @@
+             if output_final_state:
+                 return output, output_state
+             return output
+-    if _arch_major == 10:
++    if _arch_major in (10, 11):  # THOR_SM110_GDN_ALLOWLIST
+         if _cuda_major < 13:
+             raise NotImplementedError(
+                 "Blackwell GDN prefill is only supported on CUDA 13+"
