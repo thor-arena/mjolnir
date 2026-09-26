@@ -4,43 +4,56 @@
 
 <p align="center">
   <a href="https://github.com"><img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-4B8BBF?logo=python&logoColor=white"></a>
-  <img alt="target" src="https://img.shields.io/badge/NVIDIA-Jetson%20AGX%20Thor%20(sm_110)-76B900">
-  <img alt="kernel" src="https://img.shields.io/badge/kernel-FA4%20GEMV%20%C2%B7%20CuTe-DSL-FFB224">
-  <img alt="status" src="https://img.shields.io/badge/bench-clean--window%20gated-2DD4BF">
+  <img alt="target" src="https://img.shields.io/badge/NVIDIA-Jetson%20AGX%20Thor-76B900">
+  <img alt="kernel" src="https://img.shields.io/badge/kernel-FA4%20GEMV%20-FFB224">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-F0883E"></a>
 </p>
 
-<p align="center"><em>Mjölnir</em> — the hammer that turns a Jetson AGX Thor into a high-throughput LLM box.</p>
+<p align="center"><em>Mjölnir</em> — <b>serve LLM models on a Jetson AGX Thor, with a dedicated FlashAttention 4 kernel that makes decode lightning fast.</b></p>
 
 ---
 
-**Mjolnir** is a vLLM deployment for the **NVIDIA Jetson AGX Thor** (CC 11.0,
-`sm_110a`) built around three things:
+**Mjolnir** is a CLI for vLLM deployment for the **NVIDIA Jetson AGX Thor**: one command brings up an OpenAI-compatible endpoint serving `Qwen3.8-27B` (NVFP4). Everything else in this repo exists to make it fast.
 
-1. **A patched vLLM image** — 14 hand-adapted patches on the vLLM aarch64
-   nightly (FA4 hd256 enablement, the GEMV decode kernel, GDN prefill, sm_110
-   gate probes, draft-decode cudagraphs) that make `Qwen3.8-27B-NVFP4`
-   actually serve on Thor. Built and verified by the image itself.
-2. **An FA4-native GEMV decode kernel** — a pure-FMA (no tensor-core)
-   CuTe-DSL kernel for the `head_dim=256` decode shape, wired into vLLM's
-   `vllm_flash_attn` cute interface. It closes the gap the tensor-core path
-   left on Thor's HBM-bound decode: **within ~10% of FlashInfer**, versus
-   **~2.9× slower** before.
-3. **A one-command bench stack** — `mjolnir` (Python, `typer`): serve the
-   model, gate every measurement on a verified idle window, run the perf
-   bench (raw per-run data, no lossy wrappers), keep an append-only
-   history log, and render the charts you see below.
+### The star of the show: a dedicated FA4 decode kernel
+
+On the Thor, **decode** is the slow part: every new token re-reads the model's entire KV cache from memory.
+
+So we wrote the missing kernel: a decode-specialized FlashAttention-4
+(**FA4**) attention for the `head_dim=256` shape — the **GEMV kernel**:
+
+- **Decode is a gather, not a matmul.** At batch size 1 each query is a
+  single vector, so the kernel skips tensor cores entirely and computes the
+  attention as a pure-FMA vectorized GEMV tuned for Thor's memory fabric.
+- **The KV read is spread across 80 CTAs** (4× the chip's 20 SMs) by an
+  automatic split-KV plan.
+- **The result:** 222.8 µs per decode step vs 202.05 µs for FlashInfer in
+  the same measurement window — **within ~10% of the best available
+  baseline**. It ships **default-on** inside the image.
+
+### Everything else it takes
+
+1. **A patched vLLM image** — 14 targeted patches on the vLLM aarch64
+   nightly that make FA4 (and NVFP4) actually run on the Thor's silicon.
+   The image build applies and verifies every patch and fails loudly if
+   one stops applying.
+2. **A one-command CLI** — `mjolnir serve up` brings the server up;
+   `mjolnir model` and `mjolnir image` are interactive pickers that remember
+   your model config and serving image; `mjolnir bench perf` produces
+   reproducible end-to-end numbers and `mjolnir verify` proves the kernel
+   is correct against an fp32 reference.
 
 ```
-mjolnir serve up          # patched vLLM + FA4 GEMV, Qwen3.8-27B NVFP4
-mjolnir bench perf        # 3 gated sweeps × 5 runs/cell → raw JSON → charts
-mjolnir verify            # kernel correctness suites (vs fp32 reference)
+mjolnir serve up          # serve Qwen3.8-27B NVFP4 with the FA4 GEMV kernel
+mjolnir model             # pick the model / config (arrow keys + enter)
+mjolnir image             # pick the vLLM image to serve with
+mjolnir bench perf        # e2e throughput sweep → raw JSON → charts
 ```
 
 ## Results
 
-Kernel level — GEMV decode vs the alternatives, one clean gated window
-(L=8192, M=1, GQA 24/4, bf16 Q + FP8 KV, wall µs, median of 300):
+Kernel level — GEMV decode vs the alternatives (L=8192, M=1, GQA 24/4,
+bf16 Q + FP8 KV, wall µs, median of 300):
 
 | config | wall (µs) | note |
 |---|---|---|
@@ -49,20 +62,18 @@ Kernel level — GEMV decode vs the alternatives, one clean gated window
 | **FA4-native GEMV, auto split-KV** | **222.8** | ← this kernel; auto picks ns=20 (80 CTAs) |
 | FlashInfer FA2-tc (same window) | 202.05 | production baseline |
 
-The two-lever decomposition (NCU achieved-BW, L2-fabric convention):
-**split-KV / CTA count is the lever** — ns 1→20 = ×8.7 kernel BW
-(13.5 → 118.3 GB/s vs the 273 GB/s roofline) and ×5.9 wall; ring depth
-(stages 2→16) is correctness-neutral (bit-identical output) and only adds
-+12.9% kernel BW at ns=20 — the right direction for large-L where KV leaves
-L2. Null results (ruled out, do not re-litigate): LDGSTS-vs-LDG (both lower
-to plain `LDG` on sm_110a), occupancy (96-thread CTAs, smem-bound).
+Where the speed comes from: batch-1 decode is a memory gather, so kernel
+speed is how much of the HBM roofline the KV read achieves. The main lever
+is **splitting the KV read across more CTAs**; ring depth (stages 2→16) is neutral at
+L=8K and is the lever for large-L, where the KV cache stops fitting in L2.
+Full NCU-level analysis: [`docs/fa4-hd256-fp8/`](docs/fa4-hd256-fp8/).
 
 ![GEMV decode kernel results](assets/benchmarks/kernel.png)
 *`assets/benchmarks/kernel.png` — generated by `mjolnir plot` from the
 committed raw JSONs in [`benchmarks/raw/`](benchmarks/raw/).*
 
-End-to-end throughput per backend (one row per gated bench sweep; the chart
-grows with the repo — every nightly bump / kernel change appends to
+End-to-end throughput per backend (one row per bench sweep; the chart grows
+with the repo — every nightly bump / kernel change appends to
 [`benchmarks/history.jsonl`](benchmarks/history.jsonl)):
 
 ![End-to-end: FA4 vs FlashInfer](assets/benchmarks/fa4-vs-fi.png)
@@ -83,10 +94,10 @@ uv tool install llama-benchy            # the perf engine (raw JSON, per-run val
 
 # serve: Qwen3.8-27B NVFP4 + FA4 + the GEMV kernel (the baked-in defaults)
 mjolnir serve up                        # builds nothing; downloads the model on first run
-mjolnir serve status                     # container + /health + queue load
+mjolnir serve status                    # container + /health + queue load
 
-# the headline: 3 independent clean-window-gated sweeps, 5 measured runs
-# per cell (6 cells: context 0/4K/8K × concurrency 1/2/4)
+# the headline: 3 independent sweeps × 5 measured runs per cell
+# (6 cells: context 0/4K/8K × concurrency 1/2/4)
 mjolnir bench perf                      # raw JSON → benchmarks/raw/…
                                          # history → benchmarks/history.jsonl
                                          # charts → assets/benchmarks/*.png
@@ -94,42 +105,31 @@ mjolnir bench perf                      # raw JSON → benchmarks/raw/…
 
 `mjolnir serve up` needs no `.env` — defaults are baked in
 (model `Qwen/Qwen3.8-27B`, config `NVFP4_FA4hd256`, port `6001`, GEMV on).
-Switch models/configs with flags or remember them with
-`mjolnir model use <model> <quant>` (a 2-line state file, not an env file) —
-or just `mjolnir model use` with no args for an interactive picker over
-`configs/` (`mjolnir model list` shows the same table).
+Pick a different model config or image with `mjolnir model` /
+`mjolnir image` or with flags, for scripts.
 
-## How the numbers are trustworthy
+## Benchmarks
 
-The Thor GPU is shared — a desktop session and, typically, the LLM itself
-run on it. Every number in this repo follows one methodology:
-
-- **Clean-window gate** — a measurement window opens only after the vLLM
-  request queue reads `0 running / 0 waiting` for N consecutive 2 s samples;
-  any non-zero sample inside the window aborts the run as `DIRTY` and it is
-  discarded. The vLLM server is **never** stopped or restarted to clean the
-  GPU. (`mjolnir gate --once` to check the window right now.)
-- **Gated relative ratios** — A/B comparisons (ns vs ns, stages vs stages,
-  GEMV vs FlashInfer) are measured *inside one window*, so co-tenancy
-  cancels; absolute BW statements rest on **NCU achieved-BW**, which is
-  immune to ungatable desktop load.
-- **Raw data, not prose** — every sweep keeps llama-benchy's raw JSON
-  (per-run `values[]` → stddev) in `benchmarks/raw/`, and one normalized row
-  per sweep in `benchmarks/history.jsonl`. Both are committed — the charts
-  are a projection of greppable data.
+Every number in this repo is reproducible from committed data: raw JSON per
+sweep (`benchmarks/raw/`) plus one normalized row per run
+(`benchmarks/history.jsonl`) — the charts are a projection of greppable
+data, rendered by `mjolnir plot`. The Thor GPU is a shared card, so the
+measurements follow a strict methodology (single-window comparisons,
+NCU-achieved-bandwidth for absolute statements):
+[`docs/methodology/benchmarking.md`](docs/methodology/benchmarking.md).
 
 ## The CLI
 
 ```
-serve   up | down | status | logs     drive the vLLM container (patched image)
-model   use <model> <quant> | show    remember the active model/config
-image   build | gates                 build the patched image / run the canaries
+serve   up | down | status | logs     drive the vLLM container
+model   [use | list]                  pick / list the model config (bare = arrow-key picker)
+image   [use | list | build | gates]  pick the vLLM image / build the patched one
 vfa     prepare                       build the GEMV'd vllm_flash_attn tree
-gate    [--once] [--confirm N]       the clean-window gate
-bench   perf | ab | kernel <task>    e2e perf · FA4-vs-FI A/B · kernel benches
+gate    [--once] [--confirm N]       server-queue check (for benches on the shared GPU)
+bench   perf | ab | kernel <task>    e2e perf · A/B across configs/images · kernel benches
 verify  [gemv-verify …]              kernel correctness suites (vs fp32 ref)
 plot    [--concurrency c] [--context L]   render the README charts
-history [--limit N]                  the append-only bench log
+history [--limit N] [--json]         bench results at a glance
 ```
 
 ```bash
@@ -170,8 +170,7 @@ mjolnir verify                                     # all GEMV correctness suites
 
 ## Roadmap
 
-- [ ] B3: mma.sync tile-shape GEMV for exact FlashInfer parity (closing the
-      last ~10%)
+- [ ] B3: mma.sync tile-shape GEMV for exact FlashInfer parity (closing the last ~10%)
 - [ ] varlen-M GEMV (decode with MTP verify, M ≤ 8)
 - [ ] upstream: FA4 hd256 FP8-descale (tracked at Dao-AILab/flash-attention#2456)
 - [ ] CI: image build + `functional` canary on aarch64 runners
@@ -180,4 +179,4 @@ mjolnir verify                                     # all GEMV correctness suites
 
 Apache-2.0 — see [LICENSE](LICENSE).
 
-<p align="center"><sub>⚡ Mjolnir — "the one that gets hot when the thunder roars."</sub></p>
+<p align="center"><sub>⚡ Mjölnir — © Mieszko Syty</sub></p>

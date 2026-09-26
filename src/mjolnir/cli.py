@@ -1,9 +1,10 @@
 """The ``mjolnir`` CLI — one command surface for the whole repo.
 
     mjolnir serve up|down|status|logs    drive the vLLM container
-    mjolnir model use|list|show         active model/config (use with no args =
-                                        interactive picker over configs/)
-    mjolnir image build|gates           build the patched image / run canaries
+    mjolnir model [use|list]            active model/config (bare = arrow-key
+                                        picker over configs/)
+    mjolnir image [use|list|build|gates] active vLLM image (bare = arrow-key
+                                        picker over local docker images)
     mjolnir vfa prepare                 build the GEMV'd vllm_flash_attn tree
     mjolnir gate                        the clean-window gate
     mjolnir bench perf|ab|kernel        end-to-end perf / A/B / kernel benches
@@ -13,6 +14,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -20,7 +23,6 @@ from typing import List, Optional
 import typer
 from rich import box
 from rich.console import Console
-from rich.prompt import Prompt
 from rich.style import Style
 from rich.table import Table
 
@@ -28,27 +30,53 @@ from mjolnir import __version__
 from mjolnir.config import (BACKEND_LABELS, BASELINE_QUANT, DEFAULT_QUANT,
                             Settings, ConfigEntry, load_layout, resolve,
                             scan_configs)
-from mjolnir import benchy, dockerctl, plots, tasks, vfa
+from mjolnir import benchy, dockerctl, plots, picker, tasks, vfa
 
 _console = Console()
 
-serve_app = typer.Typer(help="Drive the vLLM container (the patched image).")
-bench_app = typer.Typer(help="Benchmarks — gated, raw data, chartable.")
-model_app = typer.Typer(help="Pick the active model / config.")
-image_app = typer.Typer(help="The patched vLLM image.")
+_HELP_CTX = {"help_option_names": ["-h", "--help"]}
+
+
+def _picker_group(bare_fn) -> type[typer.core.TyperGroup]:
+    """A group that, when invoked bare (no subcommand), runs ``bare_fn``
+    (the arrow-key picker) instead of erroring out."""
+    class PickerGroup(typer.core.TyperGroup):
+        def invoke(self, ctx):
+            if not ctx._protected_args:
+                bare_fn()
+                return
+            return super().invoke(ctx)
+    return PickerGroup
+
+
+serve_app = typer.Typer(help="Drive the vLLM container (the patched image).",
+                        no_args_is_help=True, context_settings=_HELP_CTX)
+bench_app = typer.Typer(help="Benchmarks — gated, raw data, chartable.",
+                        no_args_is_help=True, context_settings=_HELP_CTX)
+model_app = typer.Typer(help="Pick the active model / config.",
+                        context_settings=_HELP_CTX,
+                        cls=_picker_group(lambda: model_use(None, None)))
+image_app = typer.Typer(help="Pick the active vLLM image / build the patched one.",
+                        context_settings=_HELP_CTX,
+                        cls=_picker_group(lambda: image_use(None)))
+vfa_app = typer.Typer(help="The GEMV'd vllm_flash_attn tree (kernel iteration).",
+                      no_args_is_help=True, context_settings=_HELP_CTX)
 
 app = typer.Typer(
     no_args_is_help=True,
+    context_settings=_HELP_CTX,
     help="Mjolnir — vLLM on Jetson Thor (sm_110): patched image, FA4 GEMV "
          "decode kernel, one-command serve/bench/verify CLI.")
 app.add_typer(serve_app, name="serve")
 app.add_typer(bench_app, name="bench")
 app.add_typer(model_app, name="model")
 app.add_typer(image_app, name="image")
+app.add_typer(vfa_app, name="vfa")
 
 
 def _state_file() -> Path:
-    return Path("~/.mjolnir-state.json").expanduser()
+    return Path(os.environ.get(
+        "MJOLNIR_STATE", str(Path.home() / ".mjolnir-state.json"))).expanduser()
 
 
 def _load_state() -> dict:
@@ -61,12 +89,20 @@ def _load_state() -> dict:
     return {}
 
 
+def _save_state(patch: dict) -> None:
+    """Merge ``patch`` into the state file (the active model/config/image)."""
+    st = _load_state()
+    st.update(patch)
+    _state_file().parent.mkdir(parents=True, exist_ok=True)
+    _state_file().write_text(json.dumps(st, indent=2))
+
+
 def _settings(model: Optional[str], quant: Optional[str],
               image: Optional[str], port: Optional[int],
               gemv: Optional[bool] = None) -> Settings:
     st = _load_state()
     s = resolve(model or st.get("model"), quant or st.get("quant"),
-                image, port, gemv)
+                image or st.get("image"), port, gemv)
     return s
 
 
@@ -143,32 +179,55 @@ def serve_logs(port: Optional[int] = typer.Option(None, "--port"),
 def _config_table(entries: list[ConfigEntry],
                   active_model, active_quant) -> Table:
     t = Table(box=box.SIMPLE_HEAD, pad_edge=False)
+    t.add_column("", justify="center")
     t.add_column("model", style="bold cyan")
     t.add_column("quant", style="green")
     t.add_column("backend")
     for e in entries:
         active = e.model == active_model and e.quant == active_quant
-        t.add_row(f"{e.model}  (active)" if active else e.model,
-                  e.quant, e.backend,
+        t.add_row("[green]●[/green]" if active else "",
+                  e.model, e.quant, e.backend,
                   style=Style(bold=True) if active else None)
     return t
 
 
-def _prompt_choice(prompt: str, choices: list[str], current) -> str:
-    default = current if current in choices else choices[0]
-    return Prompt.ask(f"[bold]{prompt}[/bold] [dim]{default}[/dim]",
-                      choices=choices, default=default)
+def _config_labels(entries: list[ConfigEntry]) -> list[str]:
+    return [f"{e.model} / {e.quant}" for e in entries]
+
+
+def _pick_config(entries: list[ConfigEntry], st: dict,
+                 candidates: list[ConfigEntry] | None = None,
+                 title: str = "Pick the active model / config:") -> ConfigEntry:
+    """Arrow-key pick over the candidate configs (default: the active one)."""
+    pool = candidates or entries
+    labels = _config_labels(pool)
+    cur = st.get("model") and st.get("quant")
+    default = f"{cur[0]} / {cur[1]}" if cur and f"{cur[0]} / {cur[1]}" in labels \
+        else None
+    if not sys.stdin.isatty():
+        _console.print(_config_table(entries, st.get("model"), st.get("quant")))
+        typer.secho("non-interactive session — pass model + quant "
+                    "explicitly", fg=typer.colors.RED, err=True)
+        raise typer.Exit(4)
+    try:
+        pick = picker.select(title, labels, default=default)
+    except picker.Cancelled:
+        typer.secho("cancelled — active config unchanged",
+                    fg=typer.colors.YELLOW, err=True)
+        raise typer.Exit(1)
+    return pool[labels.index(pick)]
 
 
 @model_app.command("use")
 def model_use(model: Optional[str] = typer.Argument(None, help="vendor/Model, "
-             "e.g. Qwen/Qwen3.8-27B (omit to pick interactively)"),
+             "e.g. Qwen3.8-27B (omit to pick interactively)"),
               quant: Optional[str] = typer.Argument(None, help="config name, "
              "e.g. NVFP4_FA4hd256 (omit to pick interactively)")):
-    """Remember the active model/config for serve/bench (no .env needed).
+    """Remember the active model/config (bare ``mjolnir model`` or no args
+    here = arrow-key picker over configs/).
 
-    With no arguments this renders every config found under configs/ and
-    walks the model → quant selection interactively."""
+    Persisted to a small state file ($MJOLNIR_STATE, default
+    ~/.mjolnir-state.json) — not an env file."""
     layout = load_layout()
     entries = scan_configs(layout.repo_root / "configs")
     if not entries:
@@ -176,73 +235,138 @@ def model_use(model: Optional[str] = typer.Argument(None, help="vendor/Model, "
                     fg=typer.colors.RED, err=True)
         raise typer.Exit(4)
     st = _load_state()
-    cur_model, cur_quant = st.get("model"), st.get("quant")
 
     if model and quant:
-        chosen = (model, quant)
-    else:
-        if not sys.stdin.isatty():
-            _console.print(_config_table(entries, cur_model, cur_quant))
-            typer.secho("non-interactive session — pass model + quant "
-                        "explicitly", fg=typer.colors.RED, err=True)
+        if not any(e.model == model and e.quant == quant for e in entries):
+            typer.secho(f"config not found: {model}/{quant}.yaml "
+                        f"(available: mjolnir model list)",
+                        fg=typer.colors.RED, err=True)
             raise typer.Exit(4)
-        _console.print(_config_table(entries, cur_model, cur_quant))
-        candidates = entries
-        if model or quant:
-            candidates = [e for e in entries
-                          if (not model or e.model == model)
-                          and (not quant or e.quant == quant)]
-            if not candidates:
-                typer.secho("no config matches the given model/quant",
-                            fg=typer.colors.RED, err=True)
-                raise typer.Exit(4)
-        if not model:
-            models = sorted({e.model for e in candidates},
-                            key=lambda m: (m != cur_model, m))
-            model = _prompt_choice("model", models, cur_model)
-            candidates = [e for e in candidates if e.model == model]
-        if not quant:
-            quants = sorted({e.quant for e in candidates},
-                            key=lambda q: (q != cur_quant, q))
-            quant = _prompt_choice("quant", quants, cur_quant)
-        chosen = (model, quant)
+        chosen = next(e for e in entries
+                      if e.model == model and e.quant == quant)
+    elif model or quant:
+        candidates = [e for e in entries
+                      if (not model or e.model == model)
+                      and (not quant or e.quant == quant)]
+        if not candidates:
+            typer.secho("no config matches the given model/quant "
+                        "(available: mjolnir model list)",
+                        fg=typer.colors.RED, err=True)
+            raise typer.Exit(4)
+        if len(candidates) == 1:
+            chosen = candidates[0]
+        else:
+            chosen = _pick_config(entries, st, candidates)
+    else:
+        chosen = _pick_config(entries, st)
 
-    if not any(e.model == chosen[0] and e.quant == chosen[1] for e in entries):
-        typer.secho(f"config not found: {chosen[0]}/{chosen[1]}.yaml",
-                    fg=typer.colors.RED, err=True)
-        raise typer.Exit(4)
-    _state_file().write_text(json.dumps({"model": chosen[0],
-                                         "quant": chosen[1]}, indent=2))
-    typer.secho(f"active: {chosen[0]} / {chosen[1]}  "
-                f"(→ {BACKEND_LABELS.get(chosen[1], chosen[1])})",
+    _save_state({"model": chosen.model, "quant": chosen.quant})
+    typer.secho(f"active: {chosen.model} / {chosen.quant}  "
+                f"(→ {BACKEND_LABELS.get(chosen.quant, chosen.quant)})",
                 fg=typer.colors.GREEN)
+    typer.echo(f"  state: {_state_file()}")
 
 
 @model_app.command("list")
 def model_list(as_json: bool = typer.Option(False, "--json", "-j",
                                             help="emit JSON (for scripts)")):
-    """List every config under configs/ (dir scan); mark the active one."""
+    """List every config under configs/ (● = the active one; the state file
+    is printed below the table)."""
     entries = scan_configs(load_layout().repo_root / "configs")
     st = _load_state()
     if as_json:
-        typer.echo(json.dumps([{"model": e.model, "quant": e.quant,
-                                "backend": e.backend} for e in entries],
-                             indent=2))
+        typer.echo(json.dumps(
+            {"active": {"model": st.get("model"), "quant": st.get("quant")},
+             "state_file": str(_state_file()),
+             "configs": [{"model": e.model, "quant": e.quant,
+                          "backend": e.backend} for e in entries]},
+            indent=2))
         return
     if not entries:
         typer.secho("no configs found", fg=typer.colors.YELLOW)
         return
     _console.print(_config_table(entries, st.get("model"), st.get("quant")))
-
-
-@model_app.command("show")
-def model_show():
-    """Show the active model/config."""
-    st = _load_state() or {"model": None, "quant": None}
-    typer.echo(json.dumps(st, indent=2))
+    if st.get("model"):
+        typer.secho(f"  ● active: {st['model']} / {st['quant']}",
+                    fg=typer.colors.GREEN)
+        typer.echo(f"    state: {_state_file()}  (change: mjolnir model)")
+    else:
+        typer.echo("  no active config yet — run 'mjolnir model' to pick one")
 
 
 # ── image ───────────────────────────────────────────────────────────────────
+
+def _local_images() -> list[str]:
+    """Every local docker image (``repo:tag``), deduped, order preserved."""
+    try:
+        p = subprocess.run(["docker", "images", "--format",
+                            "{{.Repository}}:{{.Tag}}"],
+                           capture_output=True, text=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return []
+    out: list[str] = []
+    for line in p.stdout.splitlines():
+        line = line.strip()
+        if line and line != "<none>:<none>" and line not in out:
+            out.append(line)
+    return out
+
+
+def _active_image(st: dict) -> str:
+    return st.get("image") or _settings(None, None, None, None).image
+
+
+@image_app.command("use")
+def image_use(image: Optional[str] = typer.Argument(None,
+              help="docker image reference (omit to pick interactively)")):
+    """Remember the active vLLM image (bare ``mjolnir image`` or no args
+    here = arrow-key picker over local docker images).
+
+    Persisted to the state file ($MJOLNIR_STATE, default
+    ~/.mjolnir-state.json) — serve/bench pick it up from there."""
+    st = _load_state()
+    imgs = _local_images()
+    if not imgs:
+        typer.secho("no local docker images found — build or pull one first",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(4)
+    if image:
+        if image not in imgs:
+            typer.secho(f"image '{image}' not found locally "
+                        f"({len(imgs)} image(s) available: mjolnir image list)",
+                        fg=typer.colors.RED, err=True)
+            raise typer.Exit(4)
+        chosen = image
+    else:
+        if not sys.stdin.isatty():
+            for i in imgs:
+                typer.echo(f"  {'●' if i == _active_image(st) else ' '}{i}")
+            typer.secho("non-interactive session — pass the image "
+                        "explicitly", fg=typer.colors.RED, err=True)
+            raise typer.Exit(4)
+        try:
+            chosen = picker.select("Pick the vLLM image:", imgs,
+                                   default=_active_image(st))
+        except picker.Cancelled:
+            typer.secho("cancelled — active image unchanged",
+                        fg=typer.colors.YELLOW, err=True)
+            raise typer.Exit(1)
+    _save_state({"image": chosen})
+    typer.secho(f"active image: {chosen}", fg=typer.colors.GREEN)
+    typer.echo(f"  state: {_state_file()}")
+
+
+@image_app.command("list")
+def image_list():
+    """List local docker images (● = the active one)."""
+    st = _load_state()
+    active = _active_image(st)
+    for i in _local_images():
+        if i == active:
+            typer.secho(f"  ● {i}  (active)", fg=typer.colors.GREEN)
+        else:
+            typer.echo(f"    {i}")
+
 
 @image_app.command("build")
 def image_build(tag: Optional[str] = typer.Option(None, "--tag"),
@@ -257,7 +381,6 @@ def image_build(tag: Optional[str] = typer.Option(None, "--tag"),
     if dry_run:
         print(" ".join(cmd))
         return
-    import subprocess
     rc = subprocess.call(cmd)
     if rc == 0:
         typer.secho(f"built {tag} — canary:  mjolnir image gates",
@@ -276,10 +399,9 @@ def image_gates(image: Optional[str] = typer.Option(None, "--image"),
 
 # ── vfa ─────────────────────────────────────────────────────────────────────
 
-@app.command()
-def vfa(image: Optional[str] = typer.Option(None, "--image"),
-        out: Optional[Path] = typer.Option(None, "--out"),
-        ) -> None:
+@vfa_app.command("prepare")
+def vfa_prepare(image: Optional[str] = typer.Option(None, "--image"),
+                out: Optional[Path] = typer.Option(None, "--out")):
     """Prepare the GEMV'd vllm_flash_attn tree (image tree + kernel + diff)."""
     s = _settings(None, None, image, None)
     try:
@@ -505,9 +627,43 @@ def plot(concurrency: int = typer.Option(1, "--concurrency"),
         raise typer.Exit(1)
 
 
+def _ctx_label(ctx: int | None) -> str:
+    if not ctx:
+        return "0"
+    return f"{ctx // 1024}K" if ctx % 1024 == 0 else str(ctx)
+
+
+def _history_record_table(r: dict) -> Table:
+    """One history record → a small tg-t/s (decode throughput) table."""
+    by: dict[int | None, dict] = {}
+    for c in r.get("cells", []):
+        tg = (c.get("tg_tps") or {}).get("mean")
+        if tg is None:
+            continue
+        by.setdefault(c.get("context"), {})[c.get("concurrency")] = tg
+    concs = sorted({cc for v in by.values() for cc in v},
+                   key=lambda x: (x is None, x or 0))
+    t = Table(box=box.SIMPLE_HEAD, pad_edge=False)
+    t.add_column("ctx")
+    for cc in concs:
+        t.add_column(f"c={cc} · t/s")
+    for ctx in sorted(by, key=lambda x: (x is None, x or 0)):
+        t.add_row(_ctx_label(ctx),
+                  *[f"{by[ctx][cc]:.1f}" if cc in by[ctx] else "—"
+                    for cc in concs])
+    return t
+
+
 @app.command()
-def history(limit: int = typer.Option(20, "--limit")):
-    """Show the latest benchmark history rows."""
+def history(limit: int = typer.Option(5, "--limit",
+                                     help="how many recent runs to show"),
+           as_json: bool = typer.Option(False, "--json", "-j",
+                                        help="emit the raw JSON records "
+                                             "(for scripts)")):
+    """Bench results at a glance: decode throughput (t/s) per recent run.
+
+    The raw substrate (every sweep, every cell) is committed in
+    benchmarks/history.jsonl — ``--json`` dumps the records."""
     layout = load_layout()
     from mjolnir.history import load_records
     recs = load_records(layout.history_file)[-limit:]
@@ -515,12 +671,14 @@ def history(limit: int = typer.Option(20, "--limit")):
         typer.secho("no history yet — run: mjolnir bench perf",
                     fg=typer.colors.YELLOW)
         return
+    if as_json:
+        typer.echo(json.dumps(recs, indent=2))
+        return
     for r in recs:
-        n = len(r.get("cells", []))
-        gate = (r.get("gate") or {}).get("clean")
-        typer.echo(f"  {r['ts']:<25} {r['backend']:<12} "
-                   f"{r.get('image', ''):<45} cells={n} "
-                   f"runs={r.get('runs')} gate={gate}")
+        ts = str(r.get("ts", ""))[:16].replace("T", " ")
+        _console.print(f"  {ts}   {r.get('backend', '')} — {r.get('image', '')}")
+        _console.print(_history_record_table(r))
+        _console.print()
 
 
 @app.command()

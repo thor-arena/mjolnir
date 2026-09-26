@@ -13,3 +13,4 @@ benchmarks/raw/*
 !benchmarks/raw/gemv-ring-fix-bench.json
 !benchmarks/raw/decode-microbench-results.json
 vfa-tree/
+task/

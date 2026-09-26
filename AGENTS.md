@@ -27,9 +27,12 @@ here.
   within ~10% of FI, vs ~2.9× slower before the kernel work. Depth:
   `docker/vllm-thor/fa4-gemv-kernel/README.md`.
 - **The `mjolnir` CLI is shippable**: `serve`, `bench perf|ab|kernel`,
-  `model use` (no args = interactive picker over `configs/`), `verify`,
-  `plot`, `history` — defaults bake in FA4 + GEMV-on for
-  `Qwen/Qwen3.8-27B` / `NVFP4_FA4hd256`, port 6001.
+  `model` / `image` (bare = arrow-key picker over `configs/` / local docker
+  images), `vfa prepare`, `verify`, `plot`, `history` — defaults bake in
+  FA4 + GEMV-on for `Qwen/Qwen3.8-27B` / `NVFP4_FA4hd256`, port 6001.
+  Selections persist to `$MJOLNIR_STATE` (default `~/.mjolnir-state.json`:
+  model + quant + image); precedence: CLI flag > state > `$MJOLNIR_*` >
+  baked-in default.
 
 ## Critical rules (read first)
 

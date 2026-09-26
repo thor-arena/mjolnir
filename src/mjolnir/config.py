@@ -2,7 +2,9 @@
 
 Everything the CLI needs has a baked-in default (the Qwen3.8-27B NVFP4 + FA4
 GEMV setup that this repo benchmarks); flags on each command override them,
-and ``$MJOLNIR_*`` env vars override both. No ``.env`` file required.
+then the remembered state (``mjolnir model`` / ``mjolnir image`` →
+``$MJOLNIR_STATE``, default ``~/.mjolnir-state.json``), then ``$MJOLNIR_*``
+env vars. No ``.env`` file required.
 """
 from __future__ import annotations
 
