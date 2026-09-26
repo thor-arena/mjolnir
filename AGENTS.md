@@ -27,8 +27,9 @@ here.
   within ~10% of FI, vs ~2.9× slower before the kernel work. Depth:
   `docker/vllm-thor/fa4-gemv-kernel/README.md`.
 - **The `mjolnir` CLI is shippable**: `serve`, `bench perf|ab|kernel`,
-  `verify`, `plot`, `history` — defaults bake in FA4 + GEMV-on for
-  `Qwen/Qwen3.8-27B` / `NVFP4_14_FA4hd256`, port 6001.
+  `model use` (no args = interactive picker over `configs/`), `verify`,
+  `plot`, `history` — defaults bake in FA4 + GEMV-on for
+  `Qwen/Qwen3.8-27B` / `NVFP4_FA4hd256`, port 6001.
 
 ## Critical rules (read first)
 
@@ -72,7 +73,7 @@ or run it as a CLI; do not copy its logic into a new bench.
 - `assets/` — logo/hero/arch SVGs + generated benchmark charts
   (`assets/benchmarks/*.png`, rendered by `mjolnir plot`).
 - `configs/<vendor>/<model>/<quant>.yaml` — model configs
-  (default: `configs/Qwen/Qwen3.8-27B/NVFP4_14_FA4hd256.yaml`).
+  (default: `configs/Qwen/Qwen3.8-27B/NVFP4_FA4hd256.yaml`).
 - `docs/` — the formalized research + workstream reports
   (index at `docs/README.md`):
   - `docs/methodology/` — the measurement discipline (clean-window gate,

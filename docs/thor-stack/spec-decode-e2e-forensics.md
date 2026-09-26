@@ -1,6 +1,6 @@
 # Spec-Decode End-to-End Forensics — v10 (FA4 hd256 FP8) vs v9 (FlashInfer)
 
-> **Status:** Complete — read-only log forensics · **Date:** 2026-09-22 · **Scope:** end-to-end comparison of the v10 serving image (FA4 hd256 FP8, config `NVFP4_14_FA4hd256`, Qwen3.8-27B NVFP4, MTP spec decode, `num_speculative_tokens=3`) against the v9 reference image (FlashInfer backend), extracted from the v10 serving log
+> **Status:** Complete — read-only log forensics · **Date:** 2026-09-22 · **Scope:** end-to-end comparison of the v10 serving image (FA4 hd256 FP8, config `NVFP4_FA4hd256`, Qwen3.8-27B NVFP4, MTP spec decode, `num_speculative_tokens=3`) against the v9 reference image (FlashInfer backend), extracted from the v10 serving log
 
 Read-only forensics task on the v10 serving log (no files modified; log read-only). Raw benchmark data lives under `benchmarks/`.
 
@@ -18,7 +18,7 @@ Read-only forensics task on the v10 serving log (no files modified; log read-onl
 
 ## 1. Source Verified
 
-- Log header line 9: `MODEL_QUANT: NVFP4_14_FA4hd256`
+- Log header line 9: `MODEL_QUANT: NVFP4_FA4hd256`
 - Line 94 (non-default args): `'attention_config': AttentionConfig(backend=<AttentionBackendEnum.FLASH_ATTN...>, flash_attn_version=4, ...)` — FA4 selected, no fallback line anywhere.
 - Line 225: `CuTeDSL JIT compilation during inference: BlackwellFusedMultiHeadAttentionForward` — the FA4 hd256 cute-DSL kernel actually ran (JIT spike at 16:19:21, first inference window).
 

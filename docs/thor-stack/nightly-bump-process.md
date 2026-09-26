@@ -122,4 +122,4 @@ kernel test sm110 gates: DONE (exit 0)
 
 ### 4.6 Verdict
 
-v9 (`sha256:321f8f618b28ce7b6842a2e70c40b68b0f427168bc8c26b3a92e00993968d2c1`, tag `mjolnir/vllm-thor:qwen38-sm110-v9`) is the new canonical image; v8 is superseded (kept for A/B reference). The 105-commit nightly delta broke nothing in the stack — worth benching v9 vs v2 (NVFP4_9) the same way v8 was.
+v9 (`sha256:321f8f618b28ce7b6842a2e70c40b68b0f427168bc8c26b3a92e00993968d2c1`, tag `mjolnir/vllm-thor:qwen38-sm110-v9`) is the new canonical image; v8 is superseded (kept for A/B reference). The 105-commit nightly delta broke nothing in the stack — worth benching v9 vs v2 (NVFP4) the same way v8 was.

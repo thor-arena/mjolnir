@@ -1,7 +1,8 @@
 """The ``mjolnir`` CLI — one command surface for the whole repo.
 
     mjolnir serve up|down|status|logs    drive the vLLM container
-    mjolnir model use|show              remember the active model/config
+    mjolnir model use|list|show         active model/config (use with no args =
+                                        interactive picker over configs/)
     mjolnir image build|gates           build the patched image / run canaries
     mjolnir vfa prepare                 build the GEMV'd vllm_flash_attn tree
     mjolnir gate                        the clean-window gate
@@ -17,11 +18,18 @@ from pathlib import Path
 from typing import List, Optional
 
 import typer
+from rich import box
+from rich.console import Console
+from rich.prompt import Prompt
+from rich.style import Style
+from rich.table import Table
 
 from mjolnir import __version__
 from mjolnir.config import (BACKEND_LABELS, BASELINE_QUANT, Settings,
-                           load_layout, resolve)
+                            ConfigEntry, load_layout, resolve, scan_configs)
 from mjolnir import benchy, dockerctl, plots, tasks, vfa
+
+_console = Console()
 
 serve_app = typer.Typer(help="Drive the vLLM container (the patched image).")
 bench_app = typer.Typer(help="Benchmarks — gated, raw data, chartable.")
@@ -67,7 +75,7 @@ def _settings(model: Optional[str], quant: Optional[str],
 def serve_up(model: Optional[str] = typer.Option(None, "--model"),
               config: Optional[str] = typer.Option(None, "--config",
                                                   help="config quant name, "
-                                                       "e.g. NVFP4_14_FA4hd256"),
+                                                       "e.g. NVFP4_FA4hd256"),
               image: Optional[str] = typer.Option(None, "--image"),
               port: Optional[int] = typer.Option(None, "--port"),
               gemv: bool = typer.Option(True, "--gemv/--no-gemv",
@@ -131,25 +139,99 @@ def serve_logs(port: Optional[int] = typer.Option(None, "--port"),
 
 # ── model ───────────────────────────────────────────────────────────────────
 
+def _config_table(entries: list[ConfigEntry],
+                  active_model, active_quant) -> Table:
+    t = Table(box=box.SIMPLE_HEAD, pad_edge=False)
+    t.add_column("model", style="bold cyan")
+    t.add_column("quant", style="green")
+    t.add_column("backend")
+    for e in entries:
+        active = e.model == active_model and e.quant == active_quant
+        t.add_row(f"{e.model}  (active)" if active else e.model,
+                  e.quant, e.backend,
+                  style=Style(bold=True) if active else None)
+    return t
+
+
+def _prompt_choice(prompt: str, choices: list[str], current) -> str:
+    default = current if current in choices else choices[0]
+    return Prompt.ask(f"[bold]{prompt}[/bold] [dim]{default}[/dim]",
+                      choices=choices, default=default)
+
+
 @model_app.command("use")
-def model_use(model: str = typer.Argument(..., help="vendor/Model, e.g. "
-                                                    "Qwen/Qwen3.8-27B"),
-               quant: str = typer.Argument(..., help="config name, e.g. "
-                                                     "NVFP4_14_FA4hd256")):
-    """Remember the active model/config for serve/bench (no .env needed)."""
+def model_use(model: Optional[str] = typer.Argument(None, help="vendor/Model, "
+             "e.g. Qwen/Qwen3.8-27B (omit to pick interactively)"),
+              quant: Optional[str] = typer.Argument(None, help="config name, "
+             "e.g. NVFP4_FA4hd256 (omit to pick interactively)")):
+    """Remember the active model/config for serve/bench (no .env needed).
+
+    With no arguments this renders every config found under configs/ and
+    walks the model → quant selection interactively."""
     layout = load_layout()
-    cfg = layout.repo_root / "configs" / model / f"{quant}.yaml"
-    if not cfg.exists():
-        known = sorted(str(p.relative_to(layout.repo_root / "configs"))
-                       for p in (layout.repo_root / "configs").rglob("*.yaml"))
-        typer.secho(f"config not found: {cfg}\nknown configs:\n  "
-                    + "\n  ".join(known), fg=typer.colors.RED, err=True)
+    entries = scan_configs(layout.repo_root / "configs")
+    if not entries:
+        typer.secho(f"no configs found under {layout.repo_root / 'configs'}",
+                    fg=typer.colors.RED, err=True)
         raise typer.Exit(4)
-    _state_file().write_text(json.dumps({"model": model, "quant": quant},
-                                        indent=2))
-    typer.secho(f"active: {model} / {quant}  "
-                f"(→ {BACKEND_LABELS.get(quant, quant)})",
+    st = _load_state()
+    cur_model, cur_quant = st.get("model"), st.get("quant")
+
+    if model and quant:
+        chosen = (model, quant)
+    else:
+        if not sys.stdin.isatty():
+            _console.print(_config_table(entries, cur_model, cur_quant))
+            typer.secho("non-interactive session — pass model + quant "
+                        "explicitly", fg=typer.colors.RED, err=True)
+            raise typer.Exit(4)
+        _console.print(_config_table(entries, cur_model, cur_quant))
+        candidates = entries
+        if model or quant:
+            candidates = [e for e in entries
+                          if (not model or e.model == model)
+                          and (not quant or e.quant == quant)]
+            if not candidates:
+                typer.secho("no config matches the given model/quant",
+                            fg=typer.colors.RED, err=True)
+                raise typer.Exit(4)
+        if not model:
+            models = sorted({e.model for e in candidates},
+                            key=lambda m: (m != cur_model, m))
+            model = _prompt_choice("model", models, cur_model)
+            candidates = [e for e in candidates if e.model == model]
+        if not quant:
+            quants = sorted({e.quant for e in candidates},
+                            key=lambda q: (q != cur_quant, q))
+            quant = _prompt_choice("quant", quants, cur_quant)
+        chosen = (model, quant)
+
+    if not any(e.model == chosen[0] and e.quant == chosen[1] for e in entries):
+        typer.secho(f"config not found: {chosen[0]}/{chosen[1]}.yaml",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(4)
+    _state_file().write_text(json.dumps({"model": chosen[0],
+                                         "quant": chosen[1]}, indent=2))
+    typer.secho(f"active: {chosen[0]} / {chosen[1]}  "
+                f"(→ {BACKEND_LABELS.get(chosen[1], chosen[1])})",
                 fg=typer.colors.GREEN)
+
+
+@model_app.command("list")
+def model_list(as_json: bool = typer.Option(False, "--json", "-j",
+                                            help="emit JSON (for scripts)")):
+    """List every config under configs/ (dir scan); mark the active one."""
+    entries = scan_configs(load_layout().repo_root / "configs")
+    st = _load_state()
+    if as_json:
+        typer.echo(json.dumps([{"model": e.model, "quant": e.quant,
+                                "backend": e.backend} for e in entries],
+                             indent=2))
+        return
+    if not entries:
+        typer.secho("no configs found", fg=typer.colors.YELLOW)
+        return
+    _console.print(_config_table(entries, st.get("model"), st.get("quant")))
 
 
 @model_app.command("show")
@@ -289,8 +371,8 @@ def bench_ab(backends: str = typer.Option("fa4-gemv,flashinfer", "--backends",
     s = _settings(model, None, image, port)
     layout = load_layout()
     plan = {
-        "fa4-gemv": ("NVFP4_14_FA4hd256", True),
-        "fa4-1cta": ("NVFP4_14_FA4hd256", False),
+        "fa4-gemv": ("NVFP4_FA4hd256", True),
+        "fa4-1cta": ("NVFP4_FA4hd256", False),
         "flashinfer": (BASELINE_QUANT, False),
     }
     legs = [b.strip() for b in backends.split(",") if b.strip()]

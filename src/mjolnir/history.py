@@ -5,7 +5,7 @@ One line per perf sweep repeat:
     {
       "ts": "2026-09-25T14:03:11+00:00", "epoch": 1758801791.123,
       "host": "thor-01", "image": "mjolnir/vllm-thor:qwen38-sm110-v11",
-      "model": "Qwen/Qwen3.8-27B", "config": "NVFP4_14_FA4hd256",
+      "model": "Qwen/Qwen3.8-27B", "config": "NVFP4_FA4hd256",
       "backend": "FA4-GEMV",
       "gate": {"clean": true, "confirm": 3, "open_ts": 1758801600.0},
       "runs": 5, "warmup_runs": 2, "exact_tg": true,

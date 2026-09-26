@@ -93,9 +93,11 @@ mjolnir bench perf                      # raw JSON → benchmarks/raw/…
 ```
 
 `mjolnir serve up` needs no `.env` — defaults are baked in
-(model `Qwen/Qwen3.8-27B`, config `NVFP4_14_FA4hd256`, port `6001`, GEMV on).
+(model `Qwen/Qwen3.8-27B`, config `NVFP4_FA4hd256`, port `6001`, GEMV on).
 Switch models/configs with flags or remember them with
-`mjolnir model use <model> <quant>` (a 2-line state file, not an env file).
+`mjolnir model use <model> <quant>` (a 2-line state file, not an env file) —
+or just `mjolnir model use` with no args for an interactive picker over
+`configs/` (`mjolnir model list` shows the same table).
 
 ## How the numbers are trustworthy
 
@@ -146,7 +148,7 @@ mjolnir verify                                     # all GEMV correctness suites
 ├── docker/vllm-thor/       the build: Dockerfile + patches/ + apply/verify
 │   ├── fa4-gemv-kernel/    the GEMV kernel package (kernel + dispatch diff + bench/verify)
 │   └── PATCHES.md          the per-patch inventory
-├── configs/Qwen/           model configs (the default NVFP4_14_FA4hd256 + FI baseline)
+├── configs/Qwen/           model configs (the default NVFP4_FA4hd256 + FI baseline)
 ├── benchmarks/
 │   ├── raw/                committed raw JSONs (kernel benches; perf raws land here)
 │   └── history.jsonl       append-only e2e bench history

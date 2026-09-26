@@ -12,8 +12,8 @@ from pathlib import Path
 
 # ── Model / config ───────────────────────────────────────────────────────────
 DEFAULT_MODEL = "Qwen/Qwen3.8-27B"
-DEFAULT_QUANT = "NVFP4_14_FA4hd256"      # FA4 + the GEMV decode kernel (this repo's default)
-BASELINE_QUANT = "NVFP4_9"               # FlashInfer baseline config
+DEFAULT_QUANT = "NVFP4_FA4hd256"      # FA4 + the GEMV decode kernel (this repo's default)
+BASELINE_QUANT = "NVFP4"               # FlashInfer baseline config
 SERVED_MODEL_NAME = "Qwen/Qwen3.8-27B"
 
 # ── Image / serving ──────────────────────────────────────────────────────────
@@ -24,10 +24,35 @@ VFA_DIST_PATH = "/usr/local/lib/python3.12/dist-packages/vllm/vllm_flash_attn"
 
 # Friendly backend labels for the history log / charts, keyed by quant config.
 BACKEND_LABELS = {
-    "NVFP4_14_FA4hd256": "FA4-GEMV",     # FA4 hd256 + our pure-FMA GEMV decode kernel
+    "NVFP4_FA4hd256": "FA4-GEMV",     # FA4 hd256 + our pure-FMA GEMV decode kernel
     "NVFP4_13_FA4": "FA4-1CTA",
-    "NVFP4_9": "FlashInfer",
+    "NVFP4": "FlashInfer",
 }
+
+
+@dataclass(frozen=True)
+class ConfigEntry:
+    """One model config discovered under ``configs/<vendor>/<model>/<quant>.yaml``."""
+
+    model: str          # "vendor/Model", e.g. "Qwen/Qwen3.8-27B"
+    quant: str          # config name, e.g. "NVFP4_FA4hd256"
+    path: Path
+
+    @property
+    def backend(self) -> str:
+        return BACKEND_LABELS.get(self.quant, self.quant)
+
+
+def scan_configs(configs_dir: Path) -> list[ConfigEntry]:
+    """Scan ``configs/<vendor>/<model>/<quant>.yaml`` into pickable entries."""
+    out: list[ConfigEntry] = []
+    if not configs_dir.is_dir():
+        return out
+    for p in sorted(configs_dir.glob("*/*/*.yaml")):
+        out.append(ConfigEntry(
+            model=str(p.parent.relative_to(configs_dir)),
+            quant=p.stem, path=p))
+    return out
 
 
 def _env(name: str, default: str) -> str:

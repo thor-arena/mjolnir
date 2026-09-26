@@ -27,9 +27,9 @@ tool-call-parser: qwen3_coder
 reasoning-parser: qwen3
 
 # ── Attention / linear backends ─────────────────────────────────────────────
-# NVFP4_14_FA4hd256 — the ONLY change vs NVFP4_9 is the attention opt-in below.
+# NVFP4_FA4hd256 — the ONLY change vs NVFP4 is the attention opt-in below.
 #
-# NVFP4_9 used `attention-backend: flashinfer` (top-level), which forced ALL 16
+# NVFP4 used `attention-backend: flashinfer` (top-level), which forced ALL 16
 # full-attention (head_dim=256) layers onto FlashInfer — FA4 could never serve them
 # because sm_110 defaults to FA2 and the Blackwell hd256 kernel was downgraded on FP8 KV.
 # Here we replace it with an `attention-config` block (the two are mutually exclusive):
@@ -58,7 +58,7 @@ kv-cache-dtype-skip-layers: sliding_window
 mamba-cache-mode: align
 mamba-cache-dtype: bfloat16
 mamba-ssm-cache-dtype: bfloat16
-# No global `block-size` and no `mamba-block-size` — same as NVFP4_9. The FA4 hd256
+# No global `block-size` and no `mamba-block-size` — same as NVFP4. The FA4 hd256
 # kernel requires page_size==128 (TMA tile_n=128), so its KV group is auto-pinned to
 # 128 by get_supported_kernel_block_sizes when FA4 hd256 is active. The GDN/mamba group
 # resolves its own block size independently (per-group block sizes in the hybrid KV
