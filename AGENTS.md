@@ -111,9 +111,11 @@ and fails fast with a pointer if it's down. It **never** restarts the server.
 **End-to-end perf:** `mjolnir bench perf` — gated llama-benchy sweeps
 (`--runs 5` measured/cell, `--repeat 3` independent windows, `--exact-tg`
 pins output length). Raw JSON → `benchmarks/raw/perf-<ts>/`, one row per
-sweep → `benchmarks/history.jsonl`, charts auto-renders. `mjolnir bench ab
---backends fa4-gemv,flashinfer` does the headline A/B (restarts the server
-per leg — do it on purpose).
+sweep → `benchmarks/history.jsonl`, charts auto-renders. `mjolnir bench ab`
+does the headline A/B (default legs: the default config vs the baseline
+config on `--image`; each leg is `'<config>'` or `'<image>:<config>'` —
+the image carries the backend, the config the serving params). Restarts
+the server per leg — do it on purpose.
 
 ## Building the image
 ```
@@ -131,7 +133,8 @@ default (`mjolnir serve up --image …` / `$MJOLNIR_IMAGE`); defaults live in
 ## Open work
 
 ### Bench (needs the live GPU)
-- [ ] **First gated end-to-end A/B**: `mjolnir bench ab --backends fa4-gemv,flashinfer`
+- [ ] **First gated end-to-end A/B**: `mjolnir bench ab`
+      (default legs: `NVFP4_FA4hd256` vs `NVFP4` on the default image)
       — produces the first FA4-GEMV row in `benchmarks/history.jsonl` and
       re-renders the README charts. (Restarts the live server per leg —
       schedule deliberately.)

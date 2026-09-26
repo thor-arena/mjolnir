@@ -133,7 +133,10 @@ history [--limit N]                  the append-only bench log
 ```
 
 ```bash
-mjolnir bench ab --backends fa4-gemv,flashinfer
+mjolnir bench ab
+# headline A/B: default config vs baseline config on --image
+# per leg: '<config>' (on --image) or '<image>:<config>' — e.g.
+# mjolnir bench ab --backends 'my-img:v2:NVFP4_FA4hd256,upstream-img:NVFP4'
 # restarts the server per leg, gated perf for each, one history row-set per leg
 
 mjolnir bench kernel gemv-ringfix --out /p/r.json   # the ns sweep + FI, one window

@@ -25,8 +25,9 @@ from rich.style import Style
 from rich.table import Table
 
 from mjolnir import __version__
-from mjolnir.config import (BACKEND_LABELS, BASELINE_QUANT, Settings,
-                            ConfigEntry, load_layout, resolve, scan_configs)
+from mjolnir.config import (BACKEND_LABELS, BASELINE_QUANT, DEFAULT_QUANT,
+                            Settings, ConfigEntry, load_layout, resolve,
+                            scan_configs)
 from mjolnir import benchy, dockerctl, plots, tasks, vfa
 
 _console = Console()
@@ -356,44 +357,79 @@ def bench_perf(runs: int = typer.Option(5, "--runs",
                         err=True)
 
 
+def _ab_legs(specs: str, default_image: str,
+             quants: set[str]) -> list[tuple[str, str]]:
+    """Parse ``--backends`` into ``(image, quant)`` legs.
+
+    Each element is a bare config name (served from ``default_image``) or
+    ``<image>:<config>`` — the last ``:`` splits, so the image may carry its
+    own registry port / tag.
+    """
+    legs: list[tuple[str, str]] = []
+    for spec in (b.strip() for b in specs.split(",")):
+        if not spec:
+            continue
+        if ":" in spec:
+            image, quant = spec.rsplit(":", 1)
+            image, quant = image.strip(), quant.strip()
+            if not image or not quant:
+                raise ValueError(
+                    f"bad leg '{spec}' — expected '<config>' or "
+                    f"'<image>:<config>'")
+            legs.append((image, quant))
+        else:
+            legs.append((default_image, spec))
+    if not legs:
+        raise ValueError("--backends is empty")
+    for _, quant in legs:
+        if quant not in quants:
+            raise ValueError(
+                f"unknown config '{quant}' — available configs: "
+                f"mjolnir model list")
+    return legs
+
+
 @bench_app.command("ab")
-def bench_ab(backends: str = typer.Option("fa4-gemv,flashinfer", "--backends",
-                                          help="comma list: fa4-gemv,"
-                                               "fa4-1cta,flashinfer"),
+def bench_ab(backends: str = typer.Option(f"{DEFAULT_QUANT},{BASELINE_QUANT}",
+                                          "--backends",
+                                          help="comma-separated legs: each is "
+                                               "'<config>' (served from "
+                                               "--image) or '<image>:<config>'"
+                                               " — config names: "
+                                               "mjolnir model list"),
              runs: int = typer.Option(5, "--runs"),
              repeat: int = typer.Option(2, "--repeat"),
              gate: bool = typer.Option(True, "--gate/--no-gate"),
              model: Optional[str] = typer.Option(None, "--model"),
-             image: Optional[str] = typer.Option(None, "--image"),
+             image: Optional[str] = typer.Option(None, "--image",
+                                                 help="image for bare-config "
+                                                      "legs (default: "
+                                                      "$MJOLNIR_IMAGE / "
+                                                      "built-in default)"),
              port: Optional[int] = typer.Option(None, "--port")):
-    """Headline A/B: restart the server per backend (FA4 GEMV vs FlashInfer),
-    gated perf bench for each, one history row-set per leg."""
+    """Headline A/B: restart the server per leg, gated perf bench for each,
+    one history row-set per leg.
+
+    Each leg is a model config (quant) name, optionally pinned to an image:
+    '<config>' or '<image>:<config>'. The image carries the backend (kernel
+    stack is baked in); the config (configs/<model>/<quant>.yaml) carries
+    the serving parameters. Bare configs use --image. Charts re-render at
+    the end."""
     s = _settings(model, None, image, port)
     layout = load_layout()
-    plan = {
-        "fa4-gemv": ("NVFP4_FA4hd256", True),
-        "fa4-1cta": ("NVFP4_FA4hd256", False),
-        "flashinfer": (BASELINE_QUANT, False),
-    }
-    legs = [b.strip() for b in backends.split(",") if b.strip()]
-    for b in legs:
-        if b not in plan:
-            typer.secho(f"unknown backend '{b}' — "
-                        f"known: {', '.join(plan)}", fg=typer.colors.RED,
-                        err=True)
-            raise typer.Exit(4)
-    for b in legs:
-        quant, gemv = plan[b]
+    quants = {e.quant for e in scan_configs(layout.repo_root / "configs")
+              if e.model == s.model}
+    try:
+        legs = _ab_legs(backends, s.image, quants)
+    except ValueError as e:
+        typer.secho(str(e), fg=typer.colors.RED, err=True)
+        raise typer.Exit(4)
+    for image, quant in legs:
+        s.image = image
         s.quant = quant
-        s.gemv = gemv
         s.backend_label = BACKEND_LABELS.get(quant, quant)
-        typer.secho(f"\n{'=' * 62}\n  A/B leg: {b}  "
-                    f"(config {quant}, GEMV={'on' if gemv else 'off'})\n"
+        typer.secho(f"\n{'=' * 62}\n  A/B leg: {quant}  (image {image})\n"
                     f"{'=' * 62}", fg=typer.colors.CYAN)
-        if not s.config_path.exists():
-            typer.secho(f"config not found: {s.config_path}",
-                        fg=typer.colors.RED, err=True)
-            raise typer.Exit(4)
         dockerctl.serve_down(s, layout.repo_root)
         dockerctl.serve_up(s, layout.repo_root, wait=True)
         try:
