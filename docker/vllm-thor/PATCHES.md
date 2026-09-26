@@ -17,8 +17,8 @@ kernel" below). Fourteen patches in total, applied by
 `apply_patches.py` onto the installed vllm package **and** the installed
 flashinfer package; verified by `verify_patches.py`.
 
-Base this was verified against: **vllm 0.29.1rc1.dev452+g3df4ae153**
-(`vllm/vllm-openai:nightly-aarch64`, 2026-09-21), FlashInfer 0.6.18.post1.
+Base this was verified against: **vllm 0.30.0**
+(`vllm/vllm-openai:v0.30.0-ubuntu2404`, 2026-09-26), FlashInfer 0.6.18.post1.
 
 | File | PR | What it fixes |
 |------|----|---------------|
@@ -633,6 +633,57 @@ The working copies in `docs/fa4-hd256-fp8/` remain the measurement record.
   two-lever decomposition (CTA-count × in-flight depth), null results
   documented (not LDGSTS-vs-LDG — both lower to plain LDG on sm_110a; not
   occupancy).
+
+## Bump to vLLM 0.30.0 (2026-09-26) — two docstring-style hunks re-adapted
+
+Base moved from `0.29.1rc1.dev452+g3df4ae153` (nightly-aarch64, 2026-09-21)
+to the **release** `vllm 0.30.0`
+(`vllm/vllm-openai:v0.30.0-ubuntu2404`, digest
+`sha256:439c19d48db36401abc914b9842d060fe610a54bc3ac29bb02505f0b69af1baf`;
+torch 2.13.0+cu130, flashinfer 0.6.18.post1 unchanged). ~1203 of 2712 vllm
+`.py` files differ between the two bases.
+
+Only **two hunks** needed re-adapting, both in `v1/core/kv_cache_utils.py`,
+and both were **context-only** breaks from an upstream repo-wide docstring
+reformat (no semantic drift in the touched regions):
+
+- **55390 hunk #3** (the `use_deepseek_v4_fallback` →
+  `use_trailing_layer_fallback` docstring rename): 0.30.0 re-indented the
+  `_annotate_eagle_groups` docstring `Args:` block from 4/8 to **8/12 spaces**
+  and dropped the trailing blank line before the closing `"""`. Context
+  re-adapted to the new indentation; lands with fuzz 1; post-patch docstring
+  verified byte-exact against the intended state.
+- **55519 hunk #1** (the warning gate `use_eagle()` →
+  `use_eagle_block_drop()` + docstring paragraph): 0.30.0 dropped the
+  trailing blank line in `_warn_if_unannotated_eagle_mamba`'s docstring.
+  Context re-adapted; lands clean.
+
+  (Both functions' *code* is unchanged across bases: `_annotate_eagle_groups`
+  already gates on `use_eagle_block_drop()` in both, so the semantic intent of
+  the two patches is exactly preserved.)
+
+Everything else applied verbatim: 54165/55519-scheduler at line offsets only;
+50885 hunk #11 with fuzz 2 (as on the previous bump); all three
+`flashinfer.py`-touching patches, the two fa_utils patches, the hd256 forward
+kernel patch, the `interface.py` 1CTA + GEMV hunks, the dflash speculator
+gate, and the flashinfer GDN hunk clean.
+
+**FA4 side note:** the 0.30.0 vendored `vllm_flash_attn/cute/` tree is
+**pre-#2916/#2917** (flash-attention's hd256 2CTA SplitKV, merged to FA
+`main` 2026-09-25, after the 0.30.0 cut — the vendored kernel still asserts
+`not is_split_kv`), so the fa4 patch group is unaffected; see
+`docs/research/fa4-hd256-upstream-status.md` (2026-09-26 update) for the
+impact analysis (auto-SplitKV disables itself on the 20-SM Thor by the
+upstream heuristic's own arithmetic, corroborating the in-tree NO-WIN).
+
+Build gates (no-GPU build on Thor; the two kernel tests self-skip, T10/T1
+execute): `all 12 vllm fixes verified` + `all 1 flashinfer fix verified`,
+compileall 7 OK, import smoke `vllm 0.30.0`, functional check 55390/55519
+**ALL PASS**, dspark non-causal **T1 gate PASS**. Image:
+`mjolnir/vllm-thor:qwen38-sm110-v13`
+(`sha256:ce760f9ad00e87c6fa67b6fbe85273c5ba03a1cec460eb29977b7fd3ed488cc6`).
+GPU canaries (T6 GDN prefill / T9 FA4 FP8-KV / kernel tests) still need a
+`--gpus all` re-run on a clean window before the new image is served.
 - Docs: `fa4-gemv-kernel/README.md` (install/knobs/results/how-to-run),
   `fa4-gemv-kernel/docs/gemv-decode-design.md` (kernel design),
   `docs/gemv-fi-gap-final.md` (ncu gap analysis vs FI),

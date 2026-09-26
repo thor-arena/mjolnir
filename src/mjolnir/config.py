@@ -19,7 +19,7 @@ BASELINE_QUANT = "NVFP4"               # FlashInfer baseline config
 SERVED_MODEL_NAME = "Qwen/Qwen3.8-27B"
 
 # ── Image / serving ──────────────────────────────────────────────────────────
-DEFAULT_IMAGE = "mjolnir/vllm-thor:qwen38-sm110-v11"
+DEFAULT_IMAGE = "mjolnir/vllm-thor:qwen38-sm110-v13"
 DEFAULT_PORT = 6001                      # host port; vLLM metrics live on the same port
 CONTAINER_NAME = "mjolnir-vllm"
 VFA_DIST_PATH = "/usr/local/lib/python3.12/dist-packages/vllm/vllm_flash_attn"
@@ -27,7 +27,6 @@ VFA_DIST_PATH = "/usr/local/lib/python3.12/dist-packages/vllm/vllm_flash_attn"
 # Friendly backend labels for the history log / charts, keyed by quant config.
 BACKEND_LABELS = {
     "NVFP4_FA4hd256": "FA4-GEMV",     # FA4 hd256 + our pure-FMA GEMV decode kernel
-    "NVFP4_13_FA4": "FA4-1CTA",
     "NVFP4": "FlashInfer",
 }
 

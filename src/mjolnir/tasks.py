@@ -165,7 +165,10 @@ def run_task(s: Settings, name: str, script_args: list[str],
     if task.kind == "bench":
         workdir = workdir or root / GEMV_DIR_RELPATH
         if vfa_tree is None:
-            default_vfa = root / "vfa-tree"
+            # ``vfa prepare`` writes <root>/vfa-tree/vllm_flash_attn — mount
+            # the package dir itself (the mount target is the in-image
+            # package path).
+            default_vfa = root / "vfa-tree" / "vllm_flash_attn"
             vfa_tree = default_vfa if default_vfa.exists() else None
             if vfa_tree is None:
                 print("[mjolnir] no GEMV'd vfa tree — prepare it first:\n"

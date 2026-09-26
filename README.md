@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/hero.svg" alt="Mjolnir — vLLM on Jetson Thor" width="820">
+  <img src="assets/header.png" alt="Mjolnir — vLLM on Jetson Thor" width="100%">
 </p>
 
 <p align="center">

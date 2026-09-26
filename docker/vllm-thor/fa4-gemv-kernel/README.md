@@ -24,8 +24,11 @@ with a FlashInfer-style GEMV: one CTA per `(kv_head, kv_chunk, batch)`,
 > `interface-gemv-dispatch.diff` reference, rebased onto the current interface)
 > land via `patches/thor-fa4-hd256-gemv-decode-sm110.patch`, applied by
 > `apply_patches.py` after the 1CTA-decode patch. The dispatch is **default-on**
-> (opt out with `VLLM_FA4_HD256_GEMV=0`). The working bench trees in
-> `docs/fa4-hd256-fp8/` remain the measurement record.
+> (opt out with `VLLM_FA4_HD256_GEMV=0`). `mjolnir vfa prepare` builds the
+> iteration tree for bench containers from the **build patch** (it detects
+> GEMV-baked images via a clean reverse-apply and skips the dispatch step).
+> The working bench trees in `docs/fa4-hd256-fp8/` remain the measurement
+> record.
 
 1. Kernel file → in-image path (imported as
    `from vllm.vllm_flash_attn.cute.sm100_hd256_decode_gemv import BlackwellHd256DecodeGEMV`):

@@ -1,18 +1,24 @@
 """Prepare a GEMV'd ``vllm_flash_attn`` tree for the bench containers.
 
-The GEMV kernel is a *test-harness* kernel: it is not baked into the image.
-``mjolnir vfa prepare`` builds the tree the bench containers mount over the
-image's in-tree ``vllm_flash_attn``:
+The agent workhorse for kernel iteration: bench containers mount this tree
+over the image's in-tree ``vllm_flash_attn``, so the GEMV kernel + dispatch
+can be edited without rebuilding the image.
+
+``mjolnir vfa prepare`` builds the tree:
 
 1. copy the image's ``vllm/vllm_flash_attn`` tree out of a throwaway
    container,
-2. drop the GEMV kernel file into ``cute/``,
-3. apply ``interface-gemv-dispatch.diff`` (GEMV-only, 4 hunks; env-gated,
-   default off in-tree — the bench containers opt in via
-   ``VLLM_FA4_HD256_GEMV=1``).
+2. drop the repo's GEMV kernel file into ``cute/`` (the iteration source of
+   truth),
+3. apply the GEMV dispatch hunks from the build patch
+   ``thor-fa4-hd256-gemv-decode-sm110.patch`` (source of truth) — unless the
+   image already ships it (recent images, v12-gemv/v13: the default-on
+   build patch bakes the dispatch in; ``git apply -p2 --reverse --check``
+   proves it and the step is skipped).
 """
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 import sys
@@ -33,9 +39,13 @@ def prepare_vfa_tree(s: Settings, out: Path | None = None,
     print(f"[mjolnir] preparing GEMV'd vfa tree at {out} (image: {img})")
     out.mkdir(parents=True, exist_ok=True)
 
-    # 1. extract the in-image vllm_flash_attn tree
+    # 1. extract the in-image vllm_flash_attn tree. --user keeps the copied
+    #    files owned by the host user (a root-extracted tree would be
+    #    un-writable for the host user editing it).
     extract = ["docker", "run", "--rm",
-               "-v", f"{out}:/out", img, "bash", "-lc",
+               "-v", f"{out}:/out",
+               "--user", f"{os.getuid()}:{os.getgid()}",
+               "--entrypoint", "bash", img, "-lc",
                f"rm -rf /out/vllm_flash_attn && cp -r {VFA_DIST_PATH} /out/vllm_flash_attn"]
     print("[mjolnir]   extracting the in-image vllm_flash_attn tree …",
           file=sys.stderr)
@@ -53,20 +63,33 @@ def prepare_vfa_tree(s: Settings, out: Path | None = None,
     print("[mjolnir]   kernel file → cute/sm100_hd256_decode_gemv.py",
           file=sys.stderr)
 
-    # 3. apply the dispatch diff (GEMV-only 4 hunks, byte-exact round-trip)
-    diff = pkg / "interface-gemv-dispatch.diff"
-    p = subprocess.run(["git", "apply", str(diff)],
-                       cwd=tree, capture_output=True, text=True)
-    if p.returncode != 0:
-        p = subprocess.run(["patch", "-p1", "-i", str(diff)],
-                           cwd=tree, capture_output=True, text=True)
+    # 3. apply the GEMV dispatch hunks — unless the image already ships
+    #    them (GEMV-baked: a clean reverse-apply proves they're in-tree).
+    #    The BUILD patch is the source of truth (the in-image dispatch may
+    #    have evolved past the fa4-gemv-kernel/ reference diff). Paths
+    #    carry a vllm/ prefix (a/vllm/vllm_flash_attn/...), so -p2 from the
+    #    tree root `out`.
+    diff = root / "docker" / "vllm-thor" / "patches" / (
+        "thor-fa4-hd256-gemv-decode-sm110.patch")
+    rev = subprocess.run(["git", "apply", "-p2", "--reverse", "--check",
+                          str(diff)],
+                         cwd=out, capture_output=True, text=True)
+    if rev.returncode == 0:
+        print("[mjolnir]   dispatch diff already in-tree (GEMV-baked image) — "
+              "skipped", file=sys.stderr)
+    else:
+        p = subprocess.run(["git", "apply", "-p2", str(diff)],
+                           cwd=out, capture_output=True, text=True)
         if p.returncode != 0:
-            raise RuntimeError(
-                "could not apply interface-gemv-dispatch.diff — the image's "
-                "interface.py has moved past the diff's assumptions:\n"
-                f"{p.stderr}")
-    print("[mjolnir]   dispatch diff applied (import + split plan + "
-          "dtype gate + use_gemv_hd256 block)", file=sys.stderr)
+            p = subprocess.run(["patch", "-p2", "-i", str(diff)],
+                               cwd=out, capture_output=True, text=True)
+            if p.returncode != 0:
+                raise RuntimeError(
+                    "could not apply the GEMV dispatch patch "
+                    f"({diff.name}) — the image's interface.py has moved "
+                    f"past its assumptions:\n{p.stdout}{p.stderr}")
+        print("[mjolnir]   dispatch patch applied (import + split plan + "
+              "dtype gate + use_gemv_hd256 block)", file=sys.stderr)
     print(f"\n[mjolnir] done — use with:\n"
           f"  mjolnir bench kernel <task> --vfa-tree {shlex.quote(str(tree))}")
     return tree

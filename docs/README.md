@@ -54,6 +54,7 @@ or upstream PR/issue anchors cited inline.
 ### thor-stack/ (serving stack)
 | File | TL;DR |
 |---|---|
+| [base-bump-2026-09-26.md](thor-stack/base-bump-2026-09-26.md) | Base bump to the vLLM 0.30.0 release image: per-patch outcomes, the two docstring-context re-adaptations, canary results. |
 | [fa4-hd256-route-trace.md](thor-stack/fa4-hd256-route-trace.md) | Exact downgrade path for FA4+FP8-KV+hd256 on sm_110; what enabling takes (weeks, not a new tile). |
 | [fa4-fp8kv-sm110.md](thor-stack/fa4-fp8kv-sm110.md) | Empirical proof FA4 hd128 FP8 2CTA runs on sm_110a (probes, PTX evidence). |
 | [gdn-prefill-fi-enable.md](thor-stack/gdn-prefill-fi-enable.md) | GDN prefill enablement: the 1-line FlashInfer hunk, gates, 3.9–5.2× live canary. |

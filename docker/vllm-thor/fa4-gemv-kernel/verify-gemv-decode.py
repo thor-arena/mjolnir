@@ -13,7 +13,10 @@ Cases
    - varlen, M=1, per-batch KV lengths {5, 1, 0} (the 0 exercises the
      kv_len==0 early exit)
 2. GEMV ON, all-bf16 Q/KV (no descales) — exercises the 16-bit KV copy path.
-3. GEMV OFF (env unset) — the untouched FA4 path must still be correct.
+3. GEMV OFF (env unset) — the untouched FA4 (tcgen05) path must still be
+   correct on `out`; LSE is not compared: the hd256 descale path does not
+   yet produce descale-correct LSE (by-design kernel assert in
+   thor-fa4-hd256-fp8-sm110 — the pending upstream FP8-descale work).
 4. Cross-check: GEMV-ON output vs GEMV-OFF output (dense L=256).
 
 Reference: dequant (q_descale/k_descale/v_descale per (batch, kv_head)),
@@ -118,6 +121,7 @@ def _run(
     max_seqlen_q: int,
     max_seqlen_k: int,
     descales: tuple[torch.Tensor | None, ...],
+    return_lse: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Call the FA4 forward directly (same entry the FA4 backend uses). The
     top-level ``flash_attn_varlen_func`` wrapper is avoided because it
@@ -135,7 +139,7 @@ def _run(
         max_seqlen_k=max_seqlen_k,
         softmax_scale=SOFTMAX_SCALE,
         causal=True,
-        return_lse=True,
+        return_lse=return_lse,
         q_descale=descales[0],
         k_descale=descales[1],
         v_descale=descales[2],
@@ -249,25 +253,26 @@ def main() -> int:
         _report_row(f"dense bf16 B={batch} L=64", ok, d_abs, rel, lse_err)
 
     # ---------------- GEMV OFF: untouched path still correct ------------------
+    # The tcgen05 descale path does not yet produce descale-correct LSE
+    # (by-design kernel assert), so this leg compares `out` only.
     torch.manual_seed(31337)
     batch, L = 1, 256
     q = _rand(torch.float8_e4m3fn, batch, 1, NUM_Q_HEADS, D)
     k = _rand(torch.float8_e4m3fn, batch, L, NUM_KV_HEADS, D)
     v = _rand(torch.float8_e4m3fn, batch, L, NUM_KV_HEADS, D)
     qd, kd, vd = _make_descales(batch)
-    out_off, lse_off = _run(
+    out_off, _ = _run(
         q, k, v, gemv=False, cu_q=None, cu_k=None,
         max_seqlen_q=1, max_seqlen_k=L, descales=(qd, kd, vd),
+        return_lse=False,
     )
-    lse_off = lse_off.squeeze(-1)
-    ref, ref_lse = _fp32_ref(q, k, v, [L] * batch, qd, kd, vd)
+    ref, _ = _fp32_ref(q, k, v, [L] * batch, qd, kd, vd)
     d_abs = float((out_off.float() - ref).abs().max())
     ref_max = float(ref.abs().max())
     rel = d_abs / ref_max
-    lse_err = float((lse_off - ref_lse).abs().max())
-    ok = d_abs <= MAX_ABS_TOL and rel <= MAX_REL_TOL and lse_err <= LSE_TOL
+    ok = d_abs <= MAX_ABS_TOL and rel <= MAX_REL_TOL
     results.append(ok)
-    _report_row("GEMV-OFF (existing path) e4m3 L=256", ok, d_abs, rel, lse_err)
+    _report_row("GEMV-OFF (existing path) e4m3 L=256", ok, d_abs, rel, None)
 
     # ---------------- cross-check GEMV-ON vs GEMV-OFF (same inputs) ----------
     out_on, _ = _run(

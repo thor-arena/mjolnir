@@ -3,35 +3,39 @@
 # vLLM overlay for Jetson AGX Thor (aarch64, SM 11.0a).
 #
 # This is a SMALL OVERLAY, not a from-source build. It takes the official
-# vLLM nightly docker image (which already ships a prebuilt aarch64 wheel with
-# the SM 11.0a CUDA kernels), then hand-adapts and applies a stack of vLLM PR
-# fixes (NOT yet merged upstream, required for Qwen3.8-27B hybrid GDN/Mamba
-# spec-decode correctness) plus Thor-authored vLLM and FlashInfer patches.
-# The fixes are hand-adapted (NOT a raw `git apply`) because the nightly code
+# vLLM docker image (release tag or nightly; the image ships a prebuilt
+# aarch64 wheel with the SM 11.0a CUDA kernels), then hand-adapts and applies
+# a stack of vLLM PR fixes (NOT yet merged upstream, required for Qwen3.8-27B
+# hybrid GDN/Mamba spec-decode correctness) plus Thor-authored vLLM and
+# FlashInfer patches.
+# The fixes are hand-adapted (NOT a raw `git apply`) because the base code
 # has diverged from each PR's base.
 #
 # The authoritative patch list — every patch, what it fixes, wall analysis,
 # drop rationale, and the sm_110 gate probes — is in PATCHES.md (the single
 # source of truth). The patch files are in patches/, applied by
 # apply_patches.py and verified by verify_patches.py; the build fails if a
-# patch no longer applies (the signal that the nightly moved).
+# patch no longer applies (the signal that the base moved).
 #
 # ────────────────────────────────────────────────────────────────────────────
-# BUMPING TO A NEWER NIGHTLY
+# BUMPING TO A NEWER vLLM
 #
-#   1. `docker pull vllm/vllm-openai:nightly-aarch64`
-#   2. `docker image inspect vllm/vllm-openai:nightly-aarch64 --format '{{index .RepoDigests 0}}'`
-#   3. Update the default BASE_IMAGE_DIGEST below (keep the floating tag too).
+# The base is a release tag (vllm/vllm-openai:v0.X.Y, aarch64 variant) or the
+# nightly (vllm/vllm-openai:nightly-aarch64).
+#
+#   1. `docker pull --platform linux/arm64 vllm/vllm-openai:<tag>`
+#   2. `docker image inspect vllm/vllm-openai:<tag> --format '{{index .RepoDigests 0}}'`
+#   3. Update the default BASE_IMAGE / BASE_IMAGE_DIGEST below.
 #   4. `docker build -t <tag> .`
 #
 # The build will FAIL if a patch no longer applies or a fix is missing after
-# application — that is the signal that the nightly moved past the assumptions
+# application — that is the signal that the base moved past the assumptions
 # one of the patches was written against, and that patch needs re-adapting.
 # Patch application is idempotent (patch -N / --forward): a fix the base image
 # already merged is skipped, not re-applied.
 #
 # Verified against base:
-#   vllm 0.29.1rc1.dev452+g3df4ae153  (nightly-aarch64, 2026-09-21)
+#   vllm 0.30.0  (vllm/vllm-openai:v0.30.0-ubuntu2404)
 #   flashinfer-python / flashinfer-cubin 0.6.18.post1
 #   torch 2.13.0+cu130
 #
@@ -42,16 +46,16 @@
 # Python 3.12). JetPack 7.x on Thor ships CUDA 13.0, so the runtime driver
 # matches the image's CUDA toolkit.
 
-ARG BASE_IMAGE=vllm/vllm-openai:nightly-aarch64
+ARG BASE_IMAGE=vllm/vllm-openai:v0.30.0-ubuntu2404
 # Pinned digest so the default build is reproducible. Override with
 # --build-arg BASE_IMAGE=vllm/vllm-openai@<digest> (or the floating tag,
 # though the floating tag is the recommended BUMP path, see above).
-ARG BASE_IMAGE_DIGEST=vllm/vllm-openai@sha256:a17c15e30254f83adadcf1d9b85db18c59ea1e76a1aca1db8db20c3a12b48ba2
+ARG BASE_IMAGE_DIGEST=vllm/vllm-openai@sha256:439c19d48db36401abc914b9842d060fe610a54bc3ac29bb02505f0b69af1baf
 
 FROM ${BASE_IMAGE_DIGEST:-${BASE_IMAGE}}
 
 LABEL org.opencontainers.image.title="vLLM Thor SM110a + Qwen3.8-27B spec-decode fixes" \
-        org.opencontainers.image.description="Nightly vllm-openai aarch64 overlay: hand-adapted vLLM PR fixes + Thor sm_110 patches for Qwen3.8-27B hybrid GDN/Mamba spec decode (full patch list in docker/vllm-thor/PATCHES.md)"
+        org.opencontainers.image.description="vllm-openai v0.30.0 aarch64 overlay: hand-adapted vLLM PR fixes + Thor sm_110 patches for Qwen3.8-27B hybrid GDN/Mamba spec decode (full patch list in docker/vllm-thor/PATCHES.md)"
 
 # patch(1) for applying the hand-adapted patches.
 RUN apt-get update && \

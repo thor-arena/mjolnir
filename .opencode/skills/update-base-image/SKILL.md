@@ -67,6 +67,10 @@ mjolnir bench perf --image mjolnir/vllm-thor:qwen38-sm110-v<N> --runs 2 --repeat
 
 ### 6. Switch the default
 - `src/mjolnir/config.py`: `DEFAULT_IMAGE = "mjolnir/vllm-thor:qwen38-sm110-v<N>"`.
+- Check the state file: a remembered image (`~/.mjolnir-state.json`, or
+  `mjolnir image list` → the ● row) beats `DEFAULT_IMAGE` — update it with
+  `mjolnir image use mjolnir/vllm-thor:qwen38-sm110-v<N>` (or drop the
+  `"image"` key) so `mjolnir serve up` actually runs the new tag.
 - Update the tag references in `README.md` and the Current-state section of
   `AGENTS.md`.
 

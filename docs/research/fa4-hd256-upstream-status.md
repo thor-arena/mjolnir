@@ -2,7 +2,18 @@
 
 > **Status:** Research complete — GO · **Date:** 2026-09-21 · **Scope:** upstream status of FP8 (descaled KV) support in the `head_dim=256` FA4 (CuTe-DSL) forward kernel, verified against `Dao-AILab/flash-attention` `main` at that date
 
-Research target: porting FP8 (descaled KV) support into the `head_dim=256` FA4 (CuTe-DSL) forward kernel for Jetson Thor (`sm_110a`, CC 11.0, 20 SMs). Local tree: `vllm 0.29.1rc1.dev452` (the pristine vLLM 0.29.1 package root). Raw fetched artifacts: `docs/fa4-hd256-fp8/raw/`.
+Research target: porting FP8 (descaled KV) support into the `head_dim=256` FA4 (CuTe-DSL) forward kernel for Jetson Thor (`sm_110a`, CC 11.0, 20 SMs). Local tree: `vllm 0.30.0` (the pristine vLLM 0.30.0 package root, since the 2026-09-26 base bump). Raw fetched artifacts: `docs/fa4-hd256-fp8/raw/`.
+
+---
+
+## 2026-09-26 update — hd256 SplitKV merged upstream (#2916 + #2917)
+
+- [PR #2916](https://github.com/Dao-AILab/flash-attention/pull/2916) "[CuTe, SM100] SplitKV for the hd256 2CTA forward kernel" + [PR #2917](https://github.com/Dao-AILab/flash-attention/pull/2917) "[CuTe, SM100] hd256 fwd: derive lengths and KV ranges from BlockInfo/SeqlenInfoQK" (self-described pure refactor; the base of the stack) — both merged by @drisspg on 2026-09-25, landing on `main` as a single squash commit `e9cf2c1`. Cross-linked into the #2456 tracker the same evening.
+- **What changed.** `sm100_hd256_2cta_fmha_forward.py` now supports **static** SplitKV: the categorical `assert not is_split_kv` becomes `assert seqlen_k_per_split is None` (dynamic split metadata still rejected; the CLC scheduler is rejected); LSE partials are required; empty splits (zero-KV-block ranges from ceil-divided causal tiles) are skipped by every warp role via the new `BlockInfo.has_kv_work` predicate (softmax writes only `LSE = -inf`); the varlen scheduler folds the split into grid dim y. `interface.py` `_get_fwd_config` gains a CTA-counting heuristic gated `arch // 10 in [10, 11] and head_dim == head_dim_v == 256` — **sm_110 is explicitly in scope** (`get_num_sms_for_selection` reads the real device → 20 on Thor). Author's GB300 (152-SM) numbers: 2.0×–3.9× decode speedup at b=1, L=4k→128k (ns=1 within ±0.2% of pre-merge).
+- **This is NOT the FP8-descale work.** `assert descale_tensors is None` is still on `main` today; the #2456 tracker (updated minutes after these merges) still lists FP8-for-hd256 as 🔨 "code complete, perf to be improved", private. This workstream's plan (wait for the upstream FP8 branch, then port per the AGENTS.md plan) is unchanged.
+- **Impact on our sm_110 GEMV stack: none, by the arithmetic.** For Qwen3.8-27B decode (b=1, GQA 24:4, M≤8 → one 256-row m-block) the heuristic computes `total_mblocks = 2·1·4·6·1 = 48` clusters vs `num_SMs = 20` → `num_splits = min(20 // 48, 128, num_n_blocks) = 0` → **auto-SplitKV stays disabled on Thor** (the GPU is already CTA-oversubscribed: 48 CTAs > 20 SMs). This independently corroborates our in-tree NO-WIN measurement (`docs/fa4-hd256-fp8/real-splitkv-bench.md`, 2026-09-24) one day before it.
+- **Base-bump consequence: zero fa4 patch rework.** The vLLM 0.30.0 vendored FA4 is **pre-#2916** (its `sm100_hd256_2cta_fmha_forward.py` still carries `assert not is_split_kv`; no `has_kv_work`, no CTA-count heuristic), so the fa4 patch group (hd256-fp8, 1cta-decode, gemv-decode) applied verbatim on the 0.30.0 bump — only two unrelated docstring-style hunks (55390/55519) needed re-adapting (`docker/vllm-thor/PATCHES.md`).
+- **When this becomes relevant to us:** large-batch × long-context on Thor (or once the persistent-cluster scheduler lands). #2916 now provides a *maintained* kernel-side SplitKV implementation (empty-split handling, varlen scheduler, paged+split tests) that our inert A1a/A1b plumbing pre-duplicated — if we ever want 1CTA+splits, swap to the upstream machinery and re-run the gated A/B rather than trusting either side's earlier verdict a priori.
 
 ---
 

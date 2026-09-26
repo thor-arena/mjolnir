@@ -12,7 +12,9 @@ Verifies the Phase-B1 GEMV decode kernel extensions
 2. Paged: paged-128 fp8 KV, ns in {1, 2, 4, 8}; paged-16 fp8 KV, ns in {1, 4}
    — page-table gather correctness at both page sizes.
 3. Cross-check: GEMV vs FA4 1CTA (natural interface path, GEMV off) with the
-   SAME inputs (guards a shared descale/LSE-convention bug).
+   SAME inputs (guards a shared descale-convention bug); `out` only — the
+   1CTA descale leg returns no LSE (the hd256 descale path does not yet
+   produce descale-correct LSE — by-design kernel assert).
 4. FlashInfer: BatchDecodeWithPagedKVCacheWrapper (block-16, fa2
    tensor-core, bf16 Q + fp8 KV) with the same KV dequant scales — the
    production v9-style leg.
@@ -152,9 +154,11 @@ def _gemv_call(ns: int | None, page_size: int,
     return out, lse_out
 
 
-def _fa4_1cta_call() -> tuple[torch.Tensor, torch.Tensor]:
+def _fa4_1cta_call() -> tuple[torch.Tensor, None]:
     """FA4 1CTA (natural interface path, GEMV off) — paged-128 varlen, the
-    decode-1cta-clean shape. Returns (out (1,H,D), lse (H,))."""
+    decode-1cta-clean shape. Returns (out (1,H,D), None): the descale path
+    does not return LSE (it does not yet produce descale-correct LSE —
+    by-design kernel assert), so the cross-check compares `out` only."""
     os.environ["VLLM_FA4_HD256_GEMV"] = "0"
     from vllm.vllm_flash_attn import flash_attn_varlen_func
 
@@ -166,11 +170,9 @@ def _fa4_1cta_call() -> tuple[torch.Tensor, torch.Tensor]:
         max_seqlen_k=L, seqused_k=sku, block_table=PT128,
         softmax_scale=SOFTMAX_SCALE, causal=True, fa_version=4,
         q_descale=QD, k_descale=KD, v_descale=VD,
-        return_softmax_lse=True,
     )
     out = raw[0] if isinstance(raw, tuple) else raw
-    lse_out = raw[1] if isinstance(raw, tuple) else None
-    return out[0], lse_out[0] if lse_out is not None else None
+    return out[0], None
 
 
 def _fi_call() -> torch.Tensor:

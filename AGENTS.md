@@ -9,10 +9,15 @@ here.
 
 ## Current state
 
-- **14-patch stack** (13 vllm + 1 flashinfer) on vLLM `0.29.1rc1.dev452`
-  (g3df4ae153, nightly-aarch64 2026-09-21). Build gate: `apply_patches.py` +
-  `verify_patches.py` (the image build fails if a patch stops applying).
-  Inventory: `docker/vllm-thor/PATCHES.md`.
+- **14-patch stack** (13 vllm + 1 flashinfer) on vLLM `0.30.0`
+  (`vllm/vllm-openai:v0.30.0-ubuntu2404`, bumped 2026-09-26; image
+  `mjolnir/vllm-thor:qwen38-sm110-v13`). The bump needed only two
+  context-only re-adaptations (55390 hunk #3, 55519 hunk #1 — an upstream
+  docstring reformat, no semantic drift); canaries: T11 FA4 hd256 FP8-KV
+  **PASS** (kernels ran on sm_110a), T10 PASS, T6/T9 INERT-OK (shared-GPU
+  OOM). Depth: `docs/thor-stack/base-bump-2026-09-26.md`. Build gate:
+  `apply_patches.py` + `verify_patches.py` (the image build fails if a patch
+  stops applying). Inventory: `docker/vllm-thor/PATCHES.md`.
 - **v11 (2026-09-24): FA4 hd256 1CTA decode** —
   `thor-fa4-hd256-1cta-decode-sm110`: decode-shaped hd256 calls (M≤8,
   non-local, dense or paged-128 TMA) drop the 2CTA cluster to a single CTA →
@@ -190,11 +195,22 @@ Plan (as probe-gated patches, same pattern as the shipped ones):
   - **FP8 input (descaled KV) for hd256: "🔨 code complete, perf to be improved"** —
     written, unmerged, not public on any branch/PR (verified 2026-09-21).
     Est. merge: Q4 2026.
-  - Merged since the RFC: exp2-emu (#2488), paged-kv TMA (#2489),
-    seqused_k/q (#2810), sm_110 arch gating (#2590 — the 2CTA kernels *do* run
-    on sm_110; only a software postprocess bug, #2491).
-  - Open: persistent-cluster scheduler (the 20-SM small-batch lever),
-    sliding-window (#2749), hd256 backward + seqused (#2891), hd512 (#2877).
+   - Merged since the RFC: exp2-emu (#2488), paged-kv TMA (#2489),
+     seqused_k/q (#2810), sm_110 arch gating (#2590 — the 2CTA kernels *do* run
+     on sm_110; only a software postprocess bug, #2491).
+   - **hd256 SplitKV fwd merged** ([#2916](https://github.com/Dao-AILab/flash-attention/pull/2916)
+     + refactor [#2917](https://github.com/Dao-AILab/flash-attention/pull/2917),
+     2026-09-25, squash `e9cf2c1`): static splits on the dedicated 2CTA fwd
+     kernel (LSE partials, empty-split safe, varlen scheduler, paged+split
+     tests; 2.0–3.9× decode on GB300). The new CTA-count heuristic is gated
+     `arch // 10 in [10, 11]` (sm_110 in scope) but auto-disables on the
+     20-SM Thor for our decode shapes (48 clusters > 20 SMs → 0 splits) —
+     corroborates our in-tree NO-WIN. NOT the FP8-descale work (still private
+     per #2456), and NOT in vLLM 0.30.0's vendored FA4 (pre-#2916), so the fa4
+     patch group is unaffected. Depth:
+     `docs/research/fa4-hd256-upstream-status.md` (2026-09-26 update).
+   - Open: persistent-cluster scheduler (the 20-SM small-batch lever),
+     sliding-window (#2749), hd256 backward + seqused (#2891), hd512 (#2877).
 - FlashInfer: no hd256+FP8 work; XQA sm_110 gap open, unassigned
   ([#2522](https://github.com/flashinfer-ai/flashinfer/issues/2522)).
 - vLLM: [#55366](https://github.com/vllm-project/vllm/pull/55366) (include SM110
