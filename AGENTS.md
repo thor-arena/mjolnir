@@ -81,7 +81,11 @@ or run it as a CLI; do not copy its logic into a new bench.
 - `assets/` — logo/hero/arch SVGs + generated benchmark charts
   (`assets/benchmarks/*.png`, rendered by `mjolnir plot`).
 - `configs/<vendor>/<model>/<quant>.yaml` — model configs
-  (default: `configs/Qwen/Qwen3.8-27B/NVFP4_FA4hd256.yaml`).
+  (default: `configs/Qwen/Qwen3.8-27B/NVFP4_FA4hd256.yaml`). User-local
+  configs also load from `~/.local/share/mjolnir/configs/` (`$MJOLNIR_CONFIGS_DIR`);
+  on a `(model, quant)` clash the repo copy wins. The served model name a
+  bench targets comes from the config's `served-model-name` (else its
+  `model:` field).
 - `docs/` — the formalized research + workstream reports
   (index at `docs/README.md`):
   - `docs/methodology/` — the measurement discipline (clean-window gate,
@@ -93,6 +97,9 @@ or run it as a CLI; do not copy its logic into a new bench.
   - `docs/draft-cudagraph/` — the c1 regression study + gate patch.
   - `docs/research/` — formal research notes (upstream status, prior-art,
     methodology literature review, field notes).
+  - `docs/faq/` — user-story guides for the `mjolnir` CLI (serve, defaults,
+    new model configs, A/B benches, base bumps, GEMV kernel work; index at
+    `docs/faq/index.md`).
 
 ## Running kernel tests / benchmarks — use `mjolnir`, don't hand-roll `docker run`
 `mjolnir bench kernel --help-list` shows every task. Examples:

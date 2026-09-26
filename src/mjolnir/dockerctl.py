@@ -120,6 +120,13 @@ def build_run_args(s: Settings, workdir: Path, image: str | None = None) -> list
         ("/etc/localtime", "/etc/localtime:ro"),
         ("/etc/machine-id", "/etc/machine-id:ro"),
     ]
+    # A user-local model config (outside the repo's configs/) is mounted as a
+    # single file on top of the /configs mount (the more-specific mount wins).
+    local_cfg = s.config_path
+    repo_cfg = workdir / "configs" / s.model / f"{s.quant}.yaml"
+    if local_cfg != repo_cfg and local_cfg.exists():
+        mounts.append((str(local_cfg),
+                       f"/configs/{s.model}/{s.quant}.yaml:ro"))
     for host, container in mounts:
         if host.startswith("/data") is False and not Path(host).exists() \
                 and not host.startswith(("/dev/shm", "/etc/")):

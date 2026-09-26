@@ -14,6 +14,7 @@ or upstream PR/issue anchors cited inline.
 | [`thor-stack/`](thor-stack/) | **The serving stack** — why the 13 patches exist: the FA4 hd256 downgrade route trace, the FP8-on-sm_110 kernel proof, GDN prefill enablement, the nightly-bump process, end-to-end forensics. |
 | [`draft-cudagraph/`](draft-cudagraph/) | **The draft-cudagraph c1 regression** — study + resulting gate patch design. |
 | [`research/`](research/) | **Formal research notes** — upstream status, prior-art surveys, methodology literature review, field notes. |
+| [`faq/`](faq/) | **User stories / FAQ** — task-oriented guides for the `mjolnir` CLI (serve, defaults, new model configs, A/B benches, base bumps, GEMV kernel work). Start at [`faq/index.md`](faq/index.md). |
 
 ## Suggested reading order
 
@@ -65,6 +66,23 @@ or upstream PR/issue anchors cited inline.
 | File | TL;DR |
 |---|---|
 | [c1-regression-study.md](draft-cudagraph/c1-regression-study.md) | c1 regression: the forensics mechanism doesn't hold (FA2 `batch_prefill` is replay-safe by construction); the resulting gate patch. |
+
+### faq/ (user stories / CLI guides)
+| File | TL;DR |
+|---|---|
+| [index.md](faq/index.md) | Question list → one guide per CLI task. |
+| [serve-server.md](faq/serve-server.md) | `serve up/down/status/logs`, first-launch, GEMV knob, `--dry-run`. |
+| [default-image.md](faq/default-image.md) | Active image: picker / state / env / flag; `image build` + `image gates` canary. |
+| [default-model-quant.md](faq/default-model-quant.md) | Active model/config: picker / `model use` / state; per-quant backend labels. |
+| [new-model-config.md](faq/new-model-config.md) | Add a model config: repo `configs/` vs user-local `~/.local/share/mjolnir/configs`; `served-model-name`; the serve/bench flow. |
+| [base-image-bump.md](faq/base-image-bump.md) | Bump the Dockerfile base; the build as gate; re-adapting invalidated hunks; canaries. |
+| [gemv-kernel-improvement.md](faq/gemv-kernel-improvement.md) | GEMV kernel iteration: vfa tree, verify suites, gated benches, ncu, shipping. |
+| [ab-image.md](faq/ab-image.md) | A/B a custom image vs the default: `bench ab` legs, protocol, reading history. |
+| [ab-models.md](faq/ab-models.md) | A/B different models: model-qualified legs, fairness rules, served names. |
+| [clean-window-gate.md](faq/clean-window-gate.md) | The shared-GPU rule, what "clean" means, `mjolnir gate`, ncu-vs-wall discipline. |
+| [kernel-bench-tasks.md](faq/kernel-bench-tasks.md) | The task registry (test/bench/host), raw JSON `--out`, `--dry-run`. |
+| [results-history-charts.md](faq/results-history-charts.md) | Raw JSON → history.jsonl → charts; comparing runs; provenance. |
+| [settings-precedence.md](faq/settings-precedence.md) | Flag > state > env > default; state file; `~/` data paths; scripting. |
 
 ### research/ (formal research notes)
 | File | TL;DR |

@@ -29,7 +29,7 @@ from rich.table import Table
 from mjolnir import __version__
 from mjolnir.config import (BACKEND_LABELS, BASELINE_QUANT, DEFAULT_QUANT,
                             Settings, ConfigEntry, load_layout, resolve,
-                            scan_configs)
+                            scan_all_configs, user_configs_dir)
 from mjolnir import benchy, dockerctl, plots, picker, tasks, vfa
 
 _console = Console()
@@ -49,6 +49,30 @@ def _picker_group(bare_fn) -> type[typer.core.TyperGroup]:
     return PickerGroup
 
 
+_NEXT_STEPS = """
+Next steps:
+  mjolnir serve up        serve the model (baked-in defaults: Qwen3.8-27B
+                          NVFP4 + FA4 GEMV, port 6001)
+  mjolnir serve status    container + health + request queue
+  mjolnir bench perf      gated end-to-end throughput sweep -> history + charts
+  mjolnir verify          GEMV kernel correctness suites (clean-window gated)
+  mjolnir model / image   pick another model config / serving image
+"""
+
+
+def _root_group() -> type[typer.core.TyperGroup]:
+    """The root group: bare ``mjolnir`` prints the help plus a next-steps
+    guide instead of just the help."""
+    class RootGroup(typer.core.TyperGroup):
+        def invoke(self, ctx):
+            if not ctx._protected_args:
+                ctx.command.get_help(ctx)
+                print(_NEXT_STEPS, flush=True)
+                return
+            return super().invoke(ctx)
+    return RootGroup
+
+
 serve_app = typer.Typer(help="Drive the vLLM container (the patched image).",
                         no_args_is_help=True, context_settings=_HELP_CTX)
 bench_app = typer.Typer(help="Benchmarks — gated, raw data, chartable.",
@@ -63,8 +87,8 @@ vfa_app = typer.Typer(help="The GEMV'd vllm_flash_attn tree (kernel iteration)."
                       no_args_is_help=True, context_settings=_HELP_CTX)
 
 app = typer.Typer(
-    no_args_is_help=True,
     context_settings=_HELP_CTX,
+    cls=_root_group(),
     help="Mjolnir — vLLM on Jetson Thor (sm_110): patched image, FA4 GEMV "
          "decode kernel, one-command serve/bench/verify CLI.")
 app.add_typer(serve_app, name="serve")
@@ -183,10 +207,11 @@ def _config_table(entries: list[ConfigEntry],
     t.add_column("model", style="bold cyan")
     t.add_column("quant", style="green")
     t.add_column("backend")
+    t.add_column("where")
     for e in entries:
         active = e.model == active_model and e.quant == active_quant
         t.add_row("[green]●[/green]" if active else "",
-                  e.model, e.quant, e.backend,
+                  e.model, e.quant, e.backend, e.source,
                   style=Style(bold=True) if active else None)
     return t
 
@@ -224,14 +249,16 @@ def model_use(model: Optional[str] = typer.Argument(None, help="vendor/Model, "
               quant: Optional[str] = typer.Argument(None, help="config name, "
              "e.g. NVFP4_FA4hd256 (omit to pick interactively)")):
     """Remember the active model/config (bare ``mjolnir model`` or no args
-    here = arrow-key picker over configs/).
+    here = arrow-key picker over configs: repo configs/ + user-local
+    ~/.local/share/mjolnir/configs).
 
     Persisted to a small state file ($MJOLNIR_STATE, default
     ~/.mjolnir-state.json) — not an env file."""
     layout = load_layout()
-    entries = scan_configs(layout.repo_root / "configs")
+    entries = scan_all_configs(layout)
     if not entries:
-        typer.secho(f"no configs found under {layout.repo_root / 'configs'}",
+        typer.secho(f"no configs found under {layout.repo_root / 'configs'} "
+                    f"or {user_configs_dir()}",
                     fg=typer.colors.RED, err=True)
         raise typer.Exit(4)
     st = _load_state()
@@ -270,22 +297,28 @@ def model_use(model: Optional[str] = typer.Argument(None, help="vendor/Model, "
 @model_app.command("list")
 def model_list(as_json: bool = typer.Option(False, "--json", "-j",
                                             help="emit JSON (for scripts)")):
-    """List every config under configs/ (● = the active one; the state file
-    is printed below the table)."""
-    entries = scan_configs(load_layout().repo_root / "configs")
+    """List every config (repo configs/ + the user-local dir; ● = the active
+    one; the state file is printed below the table)."""
+    layout = load_layout()
+    entries = scan_all_configs(layout)
     st = _load_state()
     if as_json:
         typer.echo(json.dumps(
             {"active": {"model": st.get("model"), "quant": st.get("quant")},
              "state_file": str(_state_file()),
+             "local_configs_dir": str(user_configs_dir()),
              "configs": [{"model": e.model, "quant": e.quant,
-                          "backend": e.backend} for e in entries]},
+                           "backend": e.backend,
+                           "source": e.source,
+                           "path": str(e.path)} for e in entries]},
             indent=2))
         return
     if not entries:
         typer.secho("no configs found", fg=typer.colors.YELLOW)
         return
     _console.print(_config_table(entries, st.get("model"), st.get("quant")))
+    if any(e.source == "local" for e in entries):
+        typer.echo(f"    local = {user_configs_dir()}")
     if st.get("model"):
         typer.secho(f"  ● active: {st['model']} / {st['quant']}",
                     fg=typer.colors.GREEN)
@@ -479,35 +512,54 @@ def bench_perf(runs: int = typer.Option(5, "--runs",
                         err=True)
 
 
-def _ab_legs(specs: str, default_image: str,
-             quants: set[str]) -> list[tuple[str, str]]:
-    """Parse ``--backends`` into ``(image, quant)`` legs.
+def _ab_legs(specs: str, default_model: str, default_image: str,
+             entries: list[ConfigEntry]) -> list[tuple[str, str, str]]:
+    """Parse ``--backends`` into ``(model, image, quant)`` legs.
 
-    Each element is a bare config name (served from ``default_image``) or
-    ``<image>:<config>`` — the last ``:`` splits, so the image may carry its
-    own registry port / tag.
+    Each element is one of:
+      * ``<config>``            — the default model's config, served from
+                                   ``default_image``;
+      * ``<image>:<config>``    — the default model's config pinned to an
+                                   image (the last ``:`` splits, so the image
+                                   may carry its own registry port / tag);
+      * ``<model>/<config>``    — a different model (``vendor/Model``) with
+                                   its config, served from ``default_image``;
+      * ``<image>:<model>/<config>`` — the same, with the image pinned too
+                                   (the last ``:`` splits the image off).
     """
-    legs: list[tuple[str, str]] = []
+    quants = {e.quant for e in entries if e.model == default_model}
+    model_quants = {(e.model, e.quant) for e in entries}
+    legs: list[tuple[str, str, str]] = []
     for spec in (b.strip() for b in specs.split(",")):
         if not spec:
             continue
         if ":" in spec:
-            image, quant = spec.rsplit(":", 1)
-            image, quant = image.strip(), quant.strip()
-            if not image or not quant:
+            image, _, spec = spec.rpartition(":")
+            if not image.strip():
                 raise ValueError(
-                    f"bad leg '{spec}' — expected '<config>' or "
-                    f"'<image>:<config>'")
-            legs.append((image, quant))
+                    f"bad leg '{spec}' — expected '<config>', "
+                    f"'<model>/<config>' or '<image>:<config>'")
         else:
-            legs.append((default_image, spec))
+            image = None
+        if "/" in spec:
+            model, _, quant = spec.rpartition("/")
+            if not model or not quant or model.count("/") != 1:
+                raise ValueError(
+                    f"bad leg '{spec}' — expected '<config>', "
+                    f"'<model>/<config>' or '<image>:<config>'")
+            if (model, quant) not in model_quants:
+                raise ValueError(
+                    f"unknown model config '{model}/{quant}' — "
+                    f"available configs: mjolnir model list")
+            legs.append((model, image or default_image, quant))
+        else:
+            if spec not in quants:
+                raise ValueError(
+                    f"unknown config '{spec}' for model {default_model} — "
+                    f"available configs: mjolnir model list")
+            legs.append((default_model, image or default_image, spec))
     if not legs:
         raise ValueError("--backends is empty")
-    for _, quant in legs:
-        if quant not in quants:
-            raise ValueError(
-                f"unknown config '{quant}' — available configs: "
-                f"mjolnir model list")
     return legs
 
 
@@ -515,10 +567,12 @@ def _ab_legs(specs: str, default_image: str,
 def bench_ab(backends: str = typer.Option(f"{DEFAULT_QUANT},{BASELINE_QUANT}",
                                           "--backends",
                                           help="comma-separated legs: each is "
-                                               "'<config>' (served from "
-                                               "--image) or '<image>:<config>'"
-                                               " — config names: "
-                                               "mjolnir model list"),
+                                               "'<config>' (the --model/state "
+                                               "model, served from --image), "
+                                               "'<image>:<config>', "
+                                               "'<model>/<config>' or "
+                                               "'<image>:<model>/<config>' — "
+                                               "available: mjolnir model list"),
              runs: int = typer.Option(5, "--runs"),
              repeat: int = typer.Option(2, "--repeat"),
              gate: bool = typer.Option(True, "--gate/--no-gate"),
@@ -532,25 +586,28 @@ def bench_ab(backends: str = typer.Option(f"{DEFAULT_QUANT},{BASELINE_QUANT}",
     """Headline A/B: restart the server per leg, gated perf bench for each,
     one history row-set per leg.
 
-    Each leg is a model config (quant) name, optionally pinned to an image:
-    '<config>' or '<image>:<config>'. The image carries the backend (kernel
-    stack is baked in); the config (configs/<model>/<quant>.yaml) carries
-    the serving parameters. Bare configs use --image. Charts re-render at
-    the end."""
+    Each leg is a model config (quant), optionally model-qualified and/or
+    image-pinned: '<config>', '<image>:<config>', '<model>/<config>' or
+    '<image>:<model>/<config>'. The image carries the backend (kernel stack
+    is baked in); the config (configs/<model>/<quant>.yaml, repo or local)
+    carries the serving parameters. Bare configs use --model/--image.
+    Compare images on one model and/or models on one image. Charts
+    re-render at the end."""
     s = _settings(model, None, image, port)
     layout = load_layout()
-    quants = {e.quant for e in scan_configs(layout.repo_root / "configs")
-              if e.model == s.model}
+    entries = scan_all_configs(layout)
     try:
-        legs = _ab_legs(backends, s.image, quants)
+        legs = _ab_legs(backends, s.model, s.image, entries)
     except ValueError as e:
         typer.secho(str(e), fg=typer.colors.RED, err=True)
         raise typer.Exit(4)
-    for image, quant in legs:
-        s.image = image
+    for leg_model, leg_image, quant in legs:
+        s.model = leg_model
+        s.image = leg_image
         s.quant = quant
         s.backend_label = BACKEND_LABELS.get(quant, quant)
-        typer.secho(f"\n{'=' * 62}\n  A/B leg: {quant}  (image {image})\n"
+        typer.secho(f"\n{'=' * 62}\n  A/B leg: {leg_model}/{quant}  "
+                    f"(image {leg_image})\n"
                     f"{'=' * 62}", fg=typer.colors.CYAN)
         dockerctl.serve_down(s, layout.repo_root)
         dockerctl.serve_up(s, layout.repo_root, wait=True)
