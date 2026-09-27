@@ -159,10 +159,12 @@ grep -E '"(median|p95|bw_gbs_nominal_kv|clean)"' /p/gemv.json
 with `mjolnir serve up` first; the launcher preflights the metrics endpoint
 and fails fast with a pointer if it's down. It **never** restarts the server.
 
-**End-to-end perf:** `mjolnir bench perf` — gated llama-benchy sweeps
-(`--runs 5` measured/cell, `--repeat 3` independent windows, `--exact-tg`
-pins output length). Raw JSON → `benchmarks/raw/perf-<ts>/`, one row per
-sweep → `benchmarks/history.jsonl`, charts auto-renders. `mjolnir bench ab`
+**End-to-end perf:** `mjolnir bench perf` — gated llama-benchy
+(`--runs 6` measured/cell, one gated sweep by default — `--repeat` adds
+independent windows, `--exact-tg` pins output length). Raw JSON + the vLLM
+server log → `benchmarks/raw/perf-<ts>/`, one row per run →
+`benchmarks/history.jsonl`, llama-benchy's terminal table prints on
+completion, charts auto-render. `mjolnir bench ab`
 does the headline A/B (default legs: the default config vs the baseline
 config on `--image`; each leg is `'<config>'` or `'<image>:<config>'` —
 the image carries the backend, the config the serving params). Restarts
@@ -189,8 +191,8 @@ default (`mjolnir serve up --image …` / `$MJOLNIR_IMAGE`); defaults live in
       — produces the first FA4-GEMV row in `benchmarks/history.jsonl` and
       re-renders the README charts. (Restarts the live server per leg —
       schedule deliberately.)
-- [ ] Re-measure the seeded history rows under the `--runs 5` / `--repeat 3`
-      protocol and re-baseline the charts.
+- [ ] Re-measure the seeded history rows under the `--runs 6` protocol and
+      re-baseline the charts.
 
 ### GEMV kernel
 - [ ] **B3 — mma.sync tile-shape GEMV for exact FI parity**: close the

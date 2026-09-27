@@ -101,13 +101,13 @@ same-window ratios. GEMV's absolute position:
 ns=1→20 = **×8.7** achieved bandwidth for the same kernel — the SplitKV
 parallelism lever that the stock hd256 kernel cannot use.
 
-Raw: [`decode-microbench-results.json`](benchmarks/raw/decode-microbench-results.json),
-[`gemv-ring-fix-bench.json`](benchmarks/raw/gemv-ring-fix-bench.json).
+Raw: [`gemv-ring-fix-bench.json`](docker/vllm-thor/fa4-gemv-kernel/gemv-ring-fix-bench.json)
+(the ns sweep), [decode micro-bench results](docs/fa4-hd256-fp8/decode-microbench.md).
 
 ### End-to-end — llama-benchy, Qwen3.8-27B NVFP4 (token-generation t/s)
 
 Rows below are the **seeded** history (3 runs, no exact-tg, pre-gate protocol)
-— the first gated A/B under `--runs 5 --repeat 3` re-baselines them
+— the first gated A/B under `--runs 6` re-baselines them
 ([roadmap](#roadmap)). Deltas vs the stock row.
 
 | backend (image, config) | c1 / no ctx | c4 / no ctx | c1 / 4K ctx | c4 / 4K ctx | c1 / 8K ctx | c4 / 8K ctx |
@@ -297,7 +297,7 @@ kernel work): [`docs/faq/index.md`](docs/faq/index.md).
 
 - **First gated end-to-end A/B** — `mjolnir bench ab` (NVFP4_FA4hd256 vs
   NVFP4 on v13): the GEMV row in `history.jsonl` + re-rendered charts; then
-  re-measure the seeded rows under `--runs 5 --repeat 3` and re-baseline.
+  re-measure the seeded rows under `--runs 6` and re-baseline.
 - **GEMV kernel** — mma.sync tile-shape variant for exact FlashInfer parity
   (the remaining ~10%, in-window); varlen-M dispatch (MTP verify, M≤8);
   large-L validation of the stages=16 ring (L=32K/64K, where KV leaves L2).
