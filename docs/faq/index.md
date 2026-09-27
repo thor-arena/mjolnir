@@ -6,6 +6,12 @@ Read [`../README.md`](../README.md) first for what the repo is; read
 [`../methodology/benchmarking.md`](../methodology/benchmarking.md) before you
 trust or publish any number.
 
+## Host setup
+
+| Story | File |
+|---|---|
+| Pre-configure a fresh Jetson Thor for mjolnir (`mjolnir hw setup`) | [setup-thor.md](setup-thor.md) |
+
 ## Serving & defaults
 
 | Story | File |
