@@ -1,12 +1,15 @@
 """Mjolnir charts — the repo's face on GitHub.
 
-Five figures, one design system (``mjolnir.theme``), all dark-dashboard
+Six figures, one design system (``mjolnir.theme``), all dark-dashboard
 style so the numbers read like a product. Two data sources: the committed
 raw JSONs (kernel microbenches) and ``benchmarks/history.jsonl`` (e2e).
 
 * ``kernel-microbench.png``   — kernel vs kernel (microbench data only, never
   e2e): the GEMV SplitKV ns sweep in one clean window + FA4-vs-FlashInfer
   decode µs vs context.
+* ``kernel-length.png``       — decode kernel wall-µs vs context length across
+  GEMV / FA4-1CTA / FlashInfer (best config each) + the KV-bandwidth
+  roofline, fed by the ``gemv-decode-bench-*.json`` raws.
 * ``vllm-vs-mjolnir-image.png`` — e2e, image vs image: the baseline vLLM
   docker image vs the Mjolnir docker image (decode + prefill panels), per
   backend row of ``history.jsonl``.
@@ -289,6 +292,108 @@ def render_kernel_charts(layout: RepoLayout) -> list[Path]:
     theme.watermark(fig)
     plt.close(fig)
     return [_save(fig, layout.charts_dir / "kernel-microbench.png")]
+
+
+# ── kernel-length.png (raw JSON fed) ─────────────────────────────────────────
+
+# gemv-decode-bench --mode values → theme series key. GEMV (dense + paged)
+# collapses to one series (best split plan / KV layout wins).
+_MULTIL_BACKEND = {
+    "gemv_dense": "FA4-GEMV",
+    "gemv_paged": "FA4-GEMV",
+    "fa4_1cta": "FA4-1CTA",
+    "flashinfer": "FlashInfer",
+}
+
+
+def _multil_L(tag: str):
+    """L<LEN> |… → the context length, or None."""
+    head = tag.split("|", 1)[0]
+    if head.startswith("L"):
+        try:
+            return int(head[1:])
+        except ValueError:
+            return None
+    return None
+
+
+def _load_decode_multil(layout: RepoLayout):
+    """Per-backend, per-L best (min) median µs from the gemv-decode-bench raws.
+
+    Returns ``({series_key: {L: best_median_us}}, roofline_dict_or_None)``.
+    """
+    per: dict[str, dict[int, float]] = {}
+    roofline: dict | None = None
+    for cand in sorted(layout.raw_dir.glob("gemv-decode-bench-*.json")):
+        data = _load_json(cand)
+        if not data:
+            continue
+        mode = data.get("env", {}).get("mode") or \
+            cand.stem.replace("gemv-decode-bench-", "")
+        slot = per.setdefault(_MULTIL_BACKEND.get(mode, mode), {})
+        for tag, d in data.get("results", {}).items():
+            if not d.get("median"):
+                continue
+            L = _multil_L(tag)
+            if L is None:
+                continue
+            prev = slot.get(L)
+            if prev is None or d["median"] < prev:
+                slot[L] = d["median"]
+        if roofline is None:
+            roofline = data.get("roofline_us")
+    return per, roofline
+
+
+def render_kernel_length(layout: RepoLayout) -> list[Path]:
+    per, roofline = _load_decode_multil(layout)
+    if not per:
+        print(f"[mjolnir] no gemv-decode-bench raws in {layout.raw_dir} — "
+              f"skipping kernel-length chart "
+              f"(run: mjolnir bench kernel gemv-bench --mode <m>)")
+        return []
+
+    plt = _fig()
+    fig, ax = plt.subplots(figsize=(13.0, 5.6))
+    theme.apply_theme(fig, ax)
+
+    all_L = sorted({L for pts in per.values() for L in pts})
+    if not all_L:
+        return []
+
+    order = [b for b in theme.BACKEND_ORDER if b in per] + \
+        [b for b in per if b not in theme.BACKEND_ORDER]
+    items: list[tuple] = []
+    for b in order:
+        pts = per[b]
+        xs = sorted(pts)
+        ys = [pts[x] for x in xs]
+        h = ax.plot(xs, ys, "-o", color=theme.color_for(b), lw=2.2, ms=6,
+                    zorder=5, label=b)[0]
+        items.append((h, b))
+    if roofline:
+        rx = sorted(int(k[1:]) for k in roofline)
+        ry = [roofline[f"L{r}"] for r in rx]
+        h = ax.plot(rx, ry, ":", color=theme.TEXT_DIM, lw=1.4, zorder=2,
+                    label="roofline (KV @ BW)")[0]
+        items.append((h, "roofline (KV @ BW)"))
+
+    ax.set_xscale("log", base=2)
+    ax.set_xticks(all_L)
+    ax.set_xticklabels([f"{L // 1024}K" for L in all_L])
+    ax.set_xlim(min(all_L) * 0.9, max(all_L) * 1.12)
+    ax.set_xlabel("context length (tokens)")
+    ax.set_ylabel("wall µs (median of 300, CUDA events)")
+    theme.style_title(ax, "Decode kernel vs context — GEMV / FA4-1CTA / FlashInfer",
+                      "M=1 · GQA 24/4 · bf16 Q + FP8 KV · nvfp4 weights · sm_110a · "
+                      "clean-window gated · GEMV = best split plan")
+    if items:
+        theme.legend(ax, [h for h, _ in items], [lb for _, lb in items], ncols=2)
+
+    _footer(fig, "mjolnir · gemv-decode-bench (dense/paged/FA4-1CTA/FlashInfer) · "
+                 "wall-clock, one clean window each")
+    theme.watermark(fig)
+    return [_save(fig, layout.charts_dir / "kernel-length.png")]
 
 
 # ── e2e + compare charts (history.jsonl fed) ─────────────────────────────────
@@ -588,6 +693,7 @@ def render_ttfr(layout: RepoLayout) -> list[Path]:
 def render_all(layout: RepoLayout) -> list[Path]:
     out: list[Path] = []
     out += render_kernel_charts(layout)
+    out += render_kernel_length(layout)
     out += render_e2e_images(layout)
     out += render_bench_compare(layout)
     out += render_tg_variability(layout)

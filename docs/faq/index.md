@@ -6,6 +6,12 @@ Read [`../README.md`](../README.md) first for what the repo is; read
 [`../methodology/benchmarking.md`](../methodology/benchmarking.md) before you
 trust or publish any number.
 
+## Host setup
+
+| Story | File |
+|---|---|
+| Pre-configure a fresh Jetson Thor for mjolnir (`mjolnir hw setup`) | [setup-thor.md](setup-thor.md) |
+
 ## Serving & defaults
 
 | Story | File |
@@ -15,6 +21,7 @@ trust or publish any number.
 | Change the default model / quant config | [default-model-quant.md](default-model-quant.md) |
 | Add a new model config (repo or user-local, persisted at `~/`) | [new-model-config.md](new-model-config.md) |
 | What wins: flag, state, env var, or baked-in default? | [settings-precedence.md](settings-precedence.md) |
+| Run the LiteLLM proxy stack (independent of the vLLM server) | [litellm-proxy.md](litellm-proxy.md) |
 
 ## Benchmarking
 

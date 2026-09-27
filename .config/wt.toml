@@ -1,3 +1,19 @@
+# PRE-START: blocking bootstrap in a freshly created worktree — install the
+# editable mjolnir into a per-worktree uv venv, so .venv/bin/mjolnir always
+# runs THIS worktree's code. copy-ignored excludes .venv/, so nothing is
+# inherited from the main checkout.
+[[pre-start]]
+venv = '''
+  if command -v uv >/dev/null 2>&1; then
+    [ -d .venv ] || uv venv .venv --python 3.11
+    # Explicit interpreter: never trust VIRTUAL_ENV (may point at another
+    # checkout's venv when wt is invoked from an activated shell).
+    uv pip install --python .venv/bin/python -e '.[plot]'
+  else
+    echo "wt: uv not found — skipping editable mjolnir venv bootstrap" >&2
+  fi
+'''
+
 # POST-START: Bootstraps worktree on first creation.
 # copy-ignored runs first; setup-env depends on .env being present.
 [[post-start]]
