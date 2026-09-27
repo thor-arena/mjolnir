@@ -31,9 +31,13 @@ here.
   (ns=20) = **222.8 µs** vs FlashInfer **202.05 µs** in the same window —
   within ~10% of FI, vs ~2.9× slower before the kernel work. Depth:
   `docker/vllm-thor/fa4-gemv-kernel/README.md`.
-- **The `mjolnir` CLI is shippable**: `serve`, `bench perf|ab|kernel`,
-  `model` / `image` (bare = arrow-key picker over `configs/` / local docker
-  images), `vfa prepare`, `verify`, `plot`, `history` — defaults bake in
+- **The `mjolnir` CLI is shippable**: `setup` (Thor host pre-config — the
+  ported HW setup: headless boot target, apt upgrade, Docker + NVIDIA
+  default runtime, pip, jtop, 32 GB swap, fan profile, service cleanup,
+  locked clocks, MAXN power mode; idempotent, needs sudo), `serve`,
+  `bench perf|ab|kernel`, `model` / `image` (bare = arrow-key picker over
+  `configs/` / local docker images), `vfa prepare`, `verify`, `plot`,
+  `history` — defaults bake in
   FA4 + GEMV-on for `Qwen/Qwen3.8-27B` / `NVFP4_FA4hd256`, port 6001.
   Selections persist to `$MJOLNIR_STATE` (default `~/.mjolnir-state.json`:
   model + quant + image); precedence: CLI flag > state > `$MJOLNIR_*` >
@@ -72,6 +76,9 @@ or run it as a CLI; do not copy its logic into a new bench.
   aarch64 nightly) + `patches/` (14 hand-adapted patches) +
   `apply_patches.py` + `verify_patches.py` (the authoritative build gate) +
   `PATCHES.md` (the per-patch inventory) + canary scripts.
+- `scripts/` — host-level scripts; `setup-thor.sh` is the Thor HW
+  pre-configuration the `mjolnir setup` command runs (port of the ~/thor
+  setup script; self-contained, Thor-only, idempotent).
 - `docker/vllm-thor/fa4-gemv-kernel/` — the **GEMV decode kernel package**
   (kernel source + `interface-gemv-dispatch.diff` reference + bench/verify
   scripts + docs). Ships **default-on** in the image (see Current state).
