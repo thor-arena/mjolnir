@@ -90,10 +90,18 @@ def render_kernel_charts(layout: RepoLayout) -> list[Path]:
         return []
 
     plt = _fig()
-    fig, axes = plt.subplots(1, 2, figsize=(13.0, 5.6))
+    if ringfix is not None and micro is not None:
+        fig, axes = plt.subplots(1, 2, figsize=(13.0, 5.6))
+        left_ax, right_ax = axes[0], axes[1]
+    elif ringfix is not None:
+        fig, left_ax = plt.subplots(figsize=(13.0, 5.6))
+        right_ax = None
+    else:
+        fig, right_ax = plt.subplots(figsize=(13.0, 5.6))
+        left_ax = None
 
-    if ringfix is not None and axes[0] is not None:
-        ax = axes[0]
+    if ringfix is not None and left_ax is not None:
+        ax = left_ax
         res = ringfix.get("results", {})
         ns_pts, ns_us = [], []
         for tag, d in res.items():
@@ -142,8 +150,8 @@ def render_kernel_charts(layout: RepoLayout) -> list[Path]:
             theme.legend(ax, [gemv_line], ["FA4-native GEMV (st16)"], ncols=1)
         ax.set_xlim(left=0.8)
 
-    if micro is not None and axes[1] is not None:
-        ax = axes[1]
+    if micro is not None and right_ax is not None:
+        ax = right_ax
         res = micro.get("results", {})
         by_backend: dict[str, dict[int, float]] = {}
         for tag, d in res.items():
@@ -189,12 +197,6 @@ def render_kernel_charts(layout: RepoLayout) -> list[Path]:
         if legend_items:
             theme.legend(ax, [h for h, _ in legend_items],
                          [lb for _, lb in legend_items])
-
-    # hide any unused panel (only the ringfix raw, or only the micro raw)
-    if ringfix is None:
-        axes[0].remove()
-    if micro is None:
-        axes[1].remove()
 
     _footer(fig, "mjolnir · clean-window gated (vLLM queue 0/0 × N samples) · "
                 "wall-clock relative ratios; ncu achieved-BW for absolutes")
