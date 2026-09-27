@@ -11,11 +11,14 @@
     mjolnir bench perf|ab|kernel        end-to-end perf / A/B / kernel benches
     mjolnir verify                      kernel correctness suites
     mjolnir plot|history                charts + the raw-data log
+    mjolnir litellm up|down|status|logs  the LiteLLM proxy stack (independent
+                                        of the vLLM server)
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -31,7 +34,7 @@ from mjolnir import __version__
 from mjolnir.config import (BACKEND_LABELS, BASELINE_QUANT, DEFAULT_QUANT,
                             Settings, ConfigEntry, load_layout, resolve,
                             scan_all_configs, user_configs_dir)
-from mjolnir import benchy, dockerctl, plots, picker, tasks, thor, vfa
+from mjolnir import benchy, dockerctl, litellm, plots, picker, tasks, thor, vfa
 
 _console = Console()
 
@@ -86,6 +89,19 @@ image_app = typer.Typer(help="Pick the active vLLM image / build the patched one
                         cls=_picker_group(lambda: image_use(None)))
 vfa_app = typer.Typer(help="The GEMV'd vllm_flash_attn tree (kernel iteration).",
                       no_args_is_help=True, context_settings=_HELP_CTX)
+litellm_app = typer.Typer(
+    help="The LiteLLM proxy stack (proxy + postgres + redis) — independent "
+         "of the vLLM server: 'litellm down' leaves vLLM running, and "
+         "'serve down' leaves the proxy up. Reads your template from the "
+         "litellm data dir, ~/.local/share/mjolnir/litellm/ (see "
+         "docker/litellm/).",
+     no_args_is_help=True, context_settings=_HELP_CTX)
+hw_app = typer.Typer(
+    help="Thor host hardware setup — one-time, idempotent provisioning steps "
+         "that run on the host (sudo where needed), e.g. the fan-profile "
+         "install. 'hw setup' must run before any fan-mode selection or "
+         "benchmarking.",
+    no_args_is_help=True, context_settings=_HELP_CTX)
 
 app = typer.Typer(
     context_settings=_HELP_CTX,
@@ -97,6 +113,8 @@ app.add_typer(bench_app, name="bench")
 app.add_typer(model_app, name="model")
 app.add_typer(image_app, name="image")
 app.add_typer(vfa_app, name="vfa")
+app.add_typer(litellm_app, name="litellm")
+app.add_typer(hw_app, name="hw")
 
 
 def _state_file() -> Path:
@@ -491,6 +509,131 @@ def vfa_prepare(image: Optional[str] = typer.Option(None, "--image"),
     except RuntimeError as e:
         typer.secho(str(e), fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
+
+
+# ── litellm ─────────────────────────────────────────────────────────────────
+
+@litellm_app.command("up")
+def litellm_up(model: Optional[str] = typer.Option(None, "--model"),
+               config: Optional[str] = typer.Option(None, "--config",
+                                                   help="config quant name, "
+                                                        "e.g. NVFP4_FA4hd256"),
+               port: Optional[int] = typer.Option(None, "--port",
+                                                  help=f"host port of the "
+                                                       f"proxy (default "
+                                                       f"{litellm.DEFAULT_PROXY_PORT})"),
+               wait: bool = typer.Option(True, "--wait/--no-wait",
+                                         help="wait for the proxy's "
+                                              "liveliness before returning"),
+               wait_timeout: float = typer.Option(600.0, "--wait-timeout"),
+               dry_run: bool = typer.Option(False, "--dry-run")):
+    """Render the config from your template (in the litellm data dir,
+    ~/.local/share/mjolnir/litellm/) with the currently selected
+    model/config, and start the stack (proxy + postgres + redis). The vLLM
+    server is reached via the host — it may be up or down."""
+    s = _settings(model, config, None, None)
+    try:
+        litellm.up(s, proxy_port=port, wait=wait,
+                   wait_timeout_s=wait_timeout, dry_run=dry_run)
+    except (litellm.LitellmError, FileNotFoundError) as e:
+        typer.secho(str(e), fg=typer.colors.RED, err=True)
+        raise typer.Exit(4 if "not found" in str(e) else 1)
+    typer.secho("\n  proxy:  mjolnir litellm status", fg=typer.colors.GREEN)
+
+
+@litellm_app.command("down")
+def litellm_down(purge: bool = typer.Option(False, "--purge",
+                                            help="also wipe the stack data "
+                                                 "(postgres + redis)"),
+                 dry_run: bool = typer.Option(False, "--dry-run")):
+    """Stop the stack (the vLLM server keeps running; data kept by
+    default, --purge wipes postgres + redis state)."""
+    raise typer.Exit(litellm.down(purge=purge, dry_run=dry_run))
+
+
+@litellm_app.command("status")
+def litellm_status(port: Optional[int] = typer.Option(None, "--port")):
+    """Container state + proxy liveliness + the rendered config path."""
+    s = _settings(None, None, None, None)
+    try:
+        st = litellm.status(s, port)
+    except FileNotFoundError as e:
+        typer.secho(str(e), fg=typer.colors.RED, err=True)
+        raise typer.Exit(4)
+    typer.echo(json.dumps(st, indent=2))
+
+
+@litellm_app.command("logs")
+def litellm_logs(follow: bool = typer.Option(False, "--follow", "-f"),
+                 tail: int = typer.Option(100, "--tail")):
+    """Tail the proxy container logs."""
+    raise typer.Exit(litellm.logs(follow=follow, tail=tail))
+
+
+@litellm_app.command("config")
+def litellm_config(model: Optional[str] = typer.Option(None, "--model"),
+                   config: Optional[str] = typer.Option(None, "--config"),
+                   show: bool = typer.Option(False, "--show",
+                                             help="print the rendered "
+                                                  "config instead of just "
+                                                  "validating it")):
+    """Render the template with the current model/config (no containers) —
+    validates the variables and the YAML."""
+    s = _settings(model, config, None, None)
+    try:
+        p = litellm.render_config(s)
+    except (litellm.LitellmError, FileNotFoundError) as e:
+        typer.secho(str(e), fg=typer.colors.RED, err=True)
+        raise typer.Exit(4 if "not found" in str(e) else 1)
+    typer.secho(f"rendered ok: {p}  (model: {s.served_model})",
+                fg=typer.colors.GREEN)
+    if show:
+        typer.echo(p.read_text())
+
+
+# ── hw ─────────────────────────────────────────────────────────────────────
+
+@hw_app.command("setup")
+def hw_setup(dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="transform on a scratch copy and show the diff — no sudo, no "
+             "writes to /etc")):
+    """One-time, idempotent fan-profile install.
+
+    Injects the `recommended` and `max` fan profiles into
+    /etc/nvfancontrol.conf (each gated — never duplicated if already
+    present), dumps the untouched conf to /etc/nvfancontrol.conf.bck on
+    first run (the .bck always holds the original — the rollback point),
+    then selects the fan mode `recommended` (instead of the stock `cool`)
+    and restarts nvfancontrol. Run this before any fan-mode selection or
+    benchmarking."""
+    script = load_layout().repo_root / "scripts" / "hw" / "fan-profiles.sh"
+    if not script.exists():
+        typer.secho(f"setup script not found: {script}", fg=typer.colors.RED,
+                    err=True)
+        raise typer.Exit(4)
+    args = ["bash", str(script)] + (["--dry-run"] if dry_run else [])
+    raise typer.Exit(subprocess.call(args))
+
+
+@hw_app.command("status")
+def hw_status():
+    """Installed fan profiles and the selected default (read-only, no sudo).
+
+    The daemon's live state (which profile it is actually running) needs
+    sudo — check it with `sudo nvfancontrol -q`."""
+    conf = Path(os.environ.get("MJOLNIR_NVFANCONF", "/etc/nvfancontrol.conf"))
+    if not conf.exists():
+        typer.secho(f"no conf at {conf}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(4)
+    text = conf.read_text()
+    profiles = re.findall(r"^[ \t]*FAN_PROFILE\s+(\w+)", text, re.M)
+    m = re.search(r"^[ \t]*FAN_DEFAULT_PROFILE\s+(\S+)", text, re.M)
+    bck = conf.with_name(conf.name + ".bck")
+    print(f"conf:     {conf}")
+    print(f"profiles: {', '.join(profiles)}")
+    print(f"default:  {m.group(1) if m else '<unset>'}")
+    print(f"backup:   {bck}" + (" (exists)" if bck.exists() else " (missing)"))
 
 
 # ── gate ────────────────────────────────────────────────────────────────────
