@@ -187,7 +187,9 @@ class Fa4Leg:
         self._call = flash_attn_varlen_func
         npg = L // 128
         self.args = dict(
-            q=cases.q, k=cases.k[:L].view(npg, 128, NUM_KV_HEADS, HEAD_DIM).contiguous(),
+            # FA4 hd256 fp8 path: e4m3 Q/K/V (matches the fp8 KV in Cases).
+            q=cases.q.to(FP8).unsqueeze(0),  # varlen q: (total_q=1, H, D)
+            k=cases.k[:L].view(npg, 128, NUM_KV_HEADS, HEAD_DIM).contiguous(),
             v=cases.v[:L].view(npg, 128, NUM_KV_HEADS, HEAD_DIM).contiguous(),
             max_seqlen_q=1,
             cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32, device=DEVICE),
@@ -234,7 +236,8 @@ class FiLeg:
             q_data_type=torch.bfloat16, kv_data_type=FP8,
             o_data_type=torch.bfloat16, sm_scale=SOFTMAX_SCALE, q_len_per_req=1,
         )
-        self.wrapper.run(self.cases.q, self.kv, q_scale=1.0, k_scale=1.0, v_scale=1.0, out=self.out)
+        self.wrapper.run(self.cases.q.unsqueeze(0), self.kv, q_scale=1.0,
+                         k_scale=1.0, v_scale=1.0, out=self.out)
 
 
 # --- timing ---------------------------------------------------------------------

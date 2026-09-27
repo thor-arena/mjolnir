@@ -3,10 +3,13 @@
 Three figures, one design system (``mjolnir.theme``), all dark-dashboard
 style so the numbers read like a product:
 
-* ``assets/benchmarks/kernel.png``    — kernel-level hero: the GEMV split-KV
-  sweep in one clean window + FA4-vs-FlashInfer decode µs vs context. Fed by
-  the committed raw JSONs in ``benchmarks/raw/`` (reproducible, greppable).
-* ``assets/benchmarks/fa4-vs-fi.png`` — end-to-end throughput per backend
+ * ``assets/benchmarks/kernel.png``    — kernel-level hero: the GEMV split-KV
+   sweep in one clean window + FA4-vs-FlashInfer decode µs vs context. Fed by
+   the committed raw JSONs in ``benchmarks/raw/`` (reproducible, greppable).
+ * ``assets/benchmarks/kernel-length.png`` — decode kernel wall-µs vs context
+   length across GEMV / FA4-1CTA / FlashInfer (best config each) + the
+   KV-bandwidth roofline. Fed by the ``gemv-decode-bench-*.json`` raws.
+ * ``assets/benchmarks/fa4-vs-fi.png`` — end-to-end throughput per backend
   (decode + prefill panels) from ``benchmarks/history.jsonl``.
 * ``assets/benchmarks/history.png``   — progress over time: tg t/s per
   backend across the dates (the living chart; every nightly bump adds a point).
@@ -88,10 +91,6 @@ def render_kernel_charts(layout: RepoLayout) -> list[Path]:
 
     plt = _fig()
     fig, axes = plt.subplots(1, 2, figsize=(13.0, 5.6))
-    if ringfix and not micro:
-        axes = [axes, None]
-    if micro and not ringfix:
-        axes = [None, axes]
 
     if ringfix is not None and axes[0] is not None:
         ax = axes[0]
@@ -191,10 +190,118 @@ def render_kernel_charts(layout: RepoLayout) -> list[Path]:
             theme.legend(ax, [h for h, _ in legend_items],
                          [lb for _, lb in legend_items])
 
+    # hide any unused panel (only the ringfix raw, or only the micro raw)
+    if ringfix is None:
+        axes[0].remove()
+    if micro is None:
+        axes[1].remove()
+
     _footer(fig, "mjolnir · clean-window gated (vLLM queue 0/0 × N samples) · "
                 "wall-clock relative ratios; ncu achieved-BW for absolutes")
     theme.watermark(fig)
     return [_save(fig, layout.charts_dir / "kernel.png")]
+
+
+# ── kernel-length.png (raw JSON fed) ─────────────────────────────────────────
+
+# gemv-decode-bench --mode values → theme series key. GEMV (dense + paged)
+# collapses to one series (best split plan / KV layout wins).
+_MULTIL_BACKEND = {
+    "gemv_dense": "FA4-GEMV",
+    "gemv_paged": "FA4-GEMV",
+    "fa4_1cta": "FA4-1CTA",
+    "flashinfer": "FlashInfer",
+}
+
+
+def _multil_L(tag: str):
+    """L<LEN> |… → the context length, or None."""
+    head = tag.split("|", 1)[0]
+    if head.startswith("L"):
+        try:
+            return int(head[1:])
+        except ValueError:
+            return None
+    return None
+
+
+def _load_decode_multil(layout: RepoLayout):
+    """Per-backend, per-L best (min) median µs from the gemv-decode-bench raws.
+
+    Returns ``({series_key: {L: best_median_us}}, roofline_dict_or_None)``.
+    """
+    per: dict[str, dict[int, float]] = {}
+    roofline: dict | None = None
+    for cand in sorted(layout.raw_dir.glob("gemv-decode-bench-*.json")):
+        data = _load_json(cand)
+        if not data:
+            continue
+        mode = data.get("env", {}).get("mode") or \
+            cand.stem.replace("gemv-decode-bench-", "")
+        slot = per.setdefault(_MULTIL_BACKEND.get(mode, mode), {})
+        for tag, d in data.get("results", {}).items():
+            if not d.get("median"):
+                continue
+            L = _multil_L(tag)
+            if L is None:
+                continue
+            prev = slot.get(L)
+            if prev is None or d["median"] < prev:
+                slot[L] = d["median"]
+        if roofline is None:
+            roofline = data.get("roofline_us")
+    return per, roofline
+
+
+def render_kernel_length(layout: RepoLayout) -> list[Path]:
+    per, roofline = _load_decode_multil(layout)
+    if not per:
+        print(f"[mjolnir] no gemv-decode-bench raws in {layout.raw_dir} — "
+              f"skipping kernel-length chart "
+              f"(run: mjolnir bench kernel gemv-bench --mode <m>)")
+        return []
+
+    plt = _fig()
+    fig, ax = plt.subplots(figsize=(13.0, 5.6))
+    theme.apply_theme(fig, ax)
+
+    all_L = sorted({L for pts in per.values() for L in pts})
+    if not all_L:
+        return []
+
+    order = [b for b in theme.BACKEND_ORDER if b in per] + \
+        [b for b in per if b not in theme.BACKEND_ORDER]
+    items: list[tuple] = []
+    for b in order:
+        pts = per[b]
+        xs = sorted(pts)
+        ys = [pts[x] for x in xs]
+        h = ax.plot(xs, ys, "-o", color=theme.color_for(b), lw=2.2, ms=6,
+                    zorder=5, label=b)[0]
+        items.append((h, b))
+    if roofline:
+        rx = sorted(int(k[1:]) for k in roofline)
+        ry = [roofline[f"L{r}"] for r in rx]
+        h = ax.plot(rx, ry, ":", color=theme.TEXT_DIM, lw=1.4, zorder=2,
+                    label="roofline (KV @ BW)")[0]
+        items.append((h, "roofline (KV @ BW)"))
+
+    ax.set_xscale("log", base=2)
+    ax.set_xticks(all_L)
+    ax.set_xticklabels([f"{L // 1024}K" for L in all_L])
+    ax.set_xlim(min(all_L) * 0.9, max(all_L) * 1.12)
+    ax.set_xlabel("context length (tokens)")
+    ax.set_ylabel("wall µs (median of 300, CUDA events)")
+    theme.style_title(ax, "Decode kernel vs context — GEMV / FA4-1CTA / FlashInfer",
+                      "M=1 · GQA 24/4 · bf16 Q + FP8 KV · nvfp4 weights · sm_110a · "
+                      "clean-window gated · GEMV = best split plan")
+    if items:
+        theme.legend(ax, [h for h, _ in items], [lb for _, lb in items], ncols=2)
+
+    _footer(fig, "mjolnir · gemv-decode-bench (dense/paged/FA4-1CTA/FlashInfer) · "
+                 "wall-clock, one clean window each")
+    theme.watermark(fig)
+    return [_save(fig, layout.charts_dir / "kernel-length.png")]
 
 
 # ── history.jsonl fed charts ─────────────────────────────────────────────────
@@ -341,6 +448,7 @@ def render_all(layout: RepoLayout, concurrency: int = 1,
                context: int = 8192) -> list[Path]:
     out: list[Path] = []
     out += render_kernel_charts(layout)
+    out += render_kernel_length(layout)
     out += render_fa4_vs_fi(layout)
     out += render_history(layout, concurrency, context)
     return out
