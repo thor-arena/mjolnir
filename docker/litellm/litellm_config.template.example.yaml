@@ -1,0 +1,192 @@
+# Example LiteLLM proxy config template.
+#
+# Copy this to the litellm data dir and edit it to match your topology —
+# that file is what `mjolnir litellm` reads (override the location with
+# $MJOLNIR_LITELLM_TEMPLATE):
+#   cp litellm_config.template.example.yaml \
+#      ~/.local/share/mjolnir/litellm/litellm_config.template.yaml
+#
+# Variable substitution (envsubst-style) happens at `mjolnir litellm up`
+# time, with:
+#   * injected from the active mjolnir model/config (the point of the CLI):
+#       ${MAIN_LLM_MODEL}          served model name (served-model-name)
+#       ${MAIN_LLM_MODEL_NAME}     raw model field from the config yaml
+#       ${RAW_MODEL_SUFFIXED}      <model>-<quant>
+#       ${LITELLM_MAIN_MODEL_BASE_URL}  default http://host.docker.internal:<vllm port>/v1
+#   * everything else from your env file ($MJOLNIR_LITELLM_ENV, default
+#     ~/.local/share/mjolnir/litellm/litellm.env — see litellm.env.example).
+#
+# Keep task-model sections (embeddings, stt, tts, ...) commented out unless
+# you serve those models — every UNDEFINED ${VAR} in non-comment lines makes
+# `mjolnir litellm up` fail with a list of the missing variables.
+
+model_list:
+  # ========================================================================
+  # Main Model (reasoning ENABLED) — the active mjolnir model/config
+  # ========================================================================
+  - model_name: ${MAIN_LLM_MODEL}
+    litellm_params: &main_litellm_params
+      model: hosted_vllm/${MAIN_LLM_MODEL}
+      api_base: ${LITELLM_MAIN_MODEL_BASE_URL}
+      extra_body:
+        chat_template_kwargs:
+          thinking: true
+          enable_thinking: true
+          enable_reasoning: true
+          preserve_thinking: true
+    model_info: &main_model_info
+      supports_reasoning: True
+      input_cost_per_token: 0.00000058
+      output_cost_per_token: 0.00000301
+      cache_read_input_token_cost: 0.0000000833
+      cache_creation_input_token_cost: 0.0
+
+  # ========================================================================
+  # Main Model Alias (reasoning DISABLED)
+  # ------------------------------------------------------------------------
+  # Inherits boilerplate via << merge keys, overrides only the toggles.
+  # chat_template_kwargs INSIDE extra_body is REQUIRED for reliable
+  # propagation to the vLLM OpenAI-compatible server.
+  # ========================================================================
+  - model_name: ${MAIN_LLM_MODEL}-no-reasoning
+    litellm_params:
+      <<: *main_litellm_params
+      extra_body:
+        chat_template_kwargs:
+          thinking: false
+          enable_thinking: false
+          enable_reasoning: false
+          preserve_thinking: false
+    model_info:
+      <<: *main_model_info
+      supports_reasoning: False
+
+  # ========================================================================
+  # Optional task models — uncomment the sections you serve, and define
+  # the matching variables in your env file (litellm.env.example).
+  # ========================================================================
+
+  # Small LLM Task Model (port 8006 on your task-models host)
+  # - model_name: ${TASKS_LLM_MODEL}
+  #   litellm_params:
+  #     model: hosted_vllm/${TASKS_LLM_MODEL}
+  #     api_base: ${TASK_MODELS_BASE_URL}:8006/v1
+
+  # Graph DB LLM Model (port 8000)
+  # - model_name: ${GRAPH_LLM_MODEL}
+  #   litellm_params:
+  #     model: hosted_vllm/${GRAPH_LLM_MODEL}
+  #     api_base: ${TASK_MODELS_BASE_URL}:8000/v1
+
+  # Embeddings Model (port 8001)
+  # - model_name: ${EMBEDDINGS_MODEL}
+  #   litellm_params:
+  #     model: hosted_vllm/${EMBEDDINGS_MODEL}
+  #     api_base: ${TASK_MODELS_BASE_URL}:8001/v1
+  #     extra_body:
+  #       encoding_format: float
+  #   model_info:
+  #     mode: embedding
+
+  # Re-Ranker Model (port 8002)
+  # - model_name: ${RERANKER_MODEL}
+  #   litellm_params:
+  #     model: hosted_vllm/${RERANKER_MODEL}
+  #     api_base: ${TASK_MODELS_BASE_URL}:8002/v1
+  #   model_info:
+  #     mode: rerank
+
+  # STT Model (port 8005)
+  # - model_name: ${STT_MODEL}
+  #   litellm_params:
+  #     model: openai/${STT_MODEL}
+  #     api_base: ${TASK_MODELS_BASE_URL}:8005/v1
+  #   model_info:
+  #     mode: audio_transcription
+
+  # TTS Model (port 8005)
+  # - model_name: ${TTS_MODEL}
+  #   litellm_params:
+  #     model: openai/${TTS_MODEL}
+  #     api_base: ${TASK_MODELS_BASE_URL}:8005/v1
+  #   model_info:
+  #     mode: audio_speech
+  #     voice: ${TTS_MODEL_VOICE}
+  #     health_check_voice: ${TTS_MODEL_VOICE}
+
+general_settings:
+  forward_openai_org_id: true
+  disable_spend_logs: false   # spend logs land in the bundled postgres
+
+  user_header_mappings:
+    - header_name: X-OpenWebUI-User-Id
+      litellm_user_role: internal_user
+    - header_name: X-OpenWebUI-User-Email
+      litellm_user_role: customer
+
+litellm_settings:
+  ssl_verify: false
+  turn_off_message_logging: true
+  enable_json_schema_validation: true
+  drop_params: true
+
+  # caching with redis (the bundled litellm_redis container)
+  cache: true
+  cache_params:
+    type: redis
+
+  default_fallbacks:
+    - ${MAIN_LLM_MODEL}
+
+router_settings:
+  optional_pre_call_checks: ["responses_api_deployment_check"]
+
+  # the os.environ/... lookups resolve LITELLM_REDIS_* inside the proxy
+  # container (set in docker-compose.yaml's environment:)
+  redis_host: os.environ/LITELLM_REDIS_HOST
+  redis_port: os.environ/LITELLM_REDIS_PORT
+  redis_password: os.environ/LITELLM_REDIS_PASSWORD
+
+  model_group_alias:
+    "${MAIN_LLM_MODEL_NAME}":
+      model: ${MAIN_LLM_MODEL}
+      hidden: true
+
+    "${RAW_MODEL_SUFFIXED}":
+      model: ${MAIN_LLM_MODEL}
+      hidden: true
+
+    llm:
+      model: ${MAIN_LLM_MODEL}
+      hidden: false
+
+    llm-no-reasoning:
+      model: ${MAIN_LLM_MODEL}-no-reasoning
+      hidden: false
+
+    # Uncomment with the matching model_list sections:
+    # small-llm:
+    #   model: ${TASKS_LLM_MODEL}
+    #   hidden: true
+    # graph-llm:
+    #   model: ${GRAPH_LLM_MODEL}
+    #   hidden: true
+    # rank:
+    #   model: ${RERANKER_MODEL}
+    #   hidden: false
+    # embed:
+    #   model: ${EMBEDDINGS_MODEL}
+    #   hidden: true
+    # text-embedding-3-small:
+    #   model: ${EMBEDDINGS_MODEL}
+    #   hidden: true
+    # tts:
+    #   model: ${TTS_MODEL}
+    #   hidden: false
+    # stt:
+    #   model: ${STT_MODEL}
+    #   hidden: false
+
+callback_settings:
+  otel:
+    message_logging: false
