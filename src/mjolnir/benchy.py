@@ -29,7 +29,8 @@ import time
 from pathlib import Path
 
 from mjolnir.config import Settings
-from mjolnir.gate import CleanWindow, PreflightError
+from mjolnir import dockerctl
+from mjolnir.gate import server_load, wait_for_idle
 from mjolnir import history as hist
 
 
@@ -63,7 +64,7 @@ def build_command(benchy: list[str], s: Settings, runs: int, warmup_runs: int,
            "--pp", str(pp), "--tg", str(tg),
            "--depth", *map(str, depths),
            "--concurrency", *map(str, concurrency),
-           "--runs", str(runs), "--warmup-runs", str(warmup_runs),
+           "--runs", str(runs),
            "--latency-mode", "generation",
            "--no-cache", "--format", "json",
            "--save-result", str(out_json)]
@@ -72,6 +73,78 @@ def build_command(benchy: list[str], s: Settings, runs: int, warmup_runs: int,
     if api_key:
         cmd += ["--api-key", api_key]
     return cmd
+
+
+# Metrics that carry per-run ``values`` (pooled across sweeps for aggregation).
+_METRICS = ("tg_tps", "pp_tps", "peak_tps", "ttfr_ms")
+
+
+def _mean(vals: list[float]) -> float:
+    return sum(vals) / len(vals)
+
+
+def _std(vals: list[float]) -> float:
+    if len(vals) < 2:
+        return 0.0
+    m = _mean(vals)
+    return (sum((v - m) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5
+
+
+def _p95(vals: list[float]) -> float:
+    """Linear-interpolated 95th percentile."""
+    if not vals:
+        return None
+    s = sorted(vals)
+    if len(s) == 1:
+        return s[0]
+    k = (len(s) - 1) * 0.95
+    lo, hi = int(k), min(int(k) + 1, len(s) - 1)
+    return s[lo] + (s[hi] - s[lo]) * (k - lo)
+
+
+def _aggregate_cells(sweep_cells: list[list[dict]]) -> list[dict]:
+    """Pool the per-run samples of every cell across the ``repeat`` sweeps.
+
+    One logical bench run is a single record: its cells carry the pooled
+    per-run ``values`` with ``mean``/``std``/``p95`` recomputed over all
+    samples (``repeat × runs``). The history chart then plots one point per
+    run instead of one per sweep."""
+    from collections import defaultdict
+    groups: dict[tuple, list[dict]] = defaultdict(list)
+    for cells in sweep_cells:
+        for c in cells:
+            groups[(c.get("concurrency"), c.get("context"))].append(c)
+    out = []
+    for (conc, ctx), clist in groups.items():
+        base = {k: v for k, v in clist[0].items()
+                if k not in _METRICS}
+        base["concurrency"], base["context"] = conc, ctx
+        for metric in _METRICS:
+            pooled: list[float] = []
+            for c in clist:
+                m = c.get(metric)
+                if m and m.get("values"):
+                    pooled.extend(m["values"])
+            if pooled:
+                base[metric] = {"mean": _mean(pooled), "std": _std(pooled),
+                                "p95": _p95(pooled), "values": pooled}
+        out.append(base)
+    out.sort(key=lambda c: (c.get("context") or 0, c.get("concurrency") or 0))
+    return out
+
+
+def _aggregate_gates(gates: list[dict | None]) -> dict | None:
+    """Collapse the per-sweep gate summaries into one for the run record."""
+    if all(g is None for g in gates):
+        return None
+    opens = [g["open_ts"] for g in gates
+             if g and g.get("open_ts") is not None]
+    return {
+        "clean": all(g and g.get("clean") for g in gates),
+        "confirm": (gates[0] or {}).get("confirm"),
+        "repeat": len(gates),
+        "open_ts": min(opens) if opens else None,
+    }
 
 
 def run_perf(s: Settings, layout, runs: int = 5, warmup_runs: int = 2,
@@ -87,7 +160,7 @@ def run_perf(s: Settings, layout, runs: int = 5, warmup_runs: int = 2,
     concurrency = concurrency or [1, 2, 4]
     benchy = find_benchy()
     if label:
-        s.backend_label = label
+        s.label = label
 
     layout.raw_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -100,50 +173,74 @@ def run_perf(s: Settings, layout, runs: int = 5, warmup_runs: int = 2,
     print(f"[mjolnir]   raw →  {out_dir}")
 
     records = []
+    sweep_cells: list[list[dict]] = []
+    sweep_gates: list[dict | None] = []
     for i in range(repeat):
         out_json = out_dir / f"benchy-r{i + 1}.json"
         cmd = build_command(benchy, s, runs, warmup_runs, exact_tg, depths,
                             concurrency, pp, tg, out_json, api_key)
         print(f"\n[mjolnir] sweep {i + 1}/{repeat}:\n  {' '.join(cmd)}")
         gate_summary = None
-        try:
-            if gate:
-                print(f"[mjolnir] waiting for a clean window "
-                      f"({confirm}× 0/0, up to {gate_timeout_s:.0f}s) …")
-                with CleanWindow(s.metrics_url, confirm=confirm,
-                                 timeout_s=gate_timeout_s) as gw:
-                    rc = subprocess.call(cmd)
-                    gate_summary = gw.summary()
-                if not gw.clean:
-                    print(f"[mjolnir] WARNING: window went DIRTY "
-                          f"({len(gw.dirty_samples)} sample(s)) — sweep "
-                          f"discarded from the history log", file=sys.stderr)
-                    continue
-            else:
-                rc = subprocess.call(cmd)
-        except (PreflightError, TimeoutError) as e:
-            raise BenchError(str(e)) from e
+        if gate:
+            if server_load(s.metrics_url) is None:
+                raise BenchError(
+                    f"vLLM metrics {s.metrics_url} unreachable — is the "
+                    f"server up? (mjolnir serve up)")
+            # One-shot clean-window check on the server under test (the
+            # --port). Wait until its queue is 0/0 for `confirm` samples,
+            # THEN start the bench. We do NOT monitor during the run: the
+            # bench's own in-flight requests would register as "dirty".
+            print(f"[mjolnir] waiting for a clean window "
+                  f"({confirm}× 0/0, up to {gate_timeout_s:.0f}s) …")
+            open_ts = wait_for_idle(s.metrics_url, confirm=confirm,
+                                    timeout_s=gate_timeout_s)
+            if open_ts is None:
+                print(f"[mjolnir] WARNING: timed out after "
+                      f"{gate_timeout_s:.0f}s waiting for a clean window — "
+                      f"sweep {i + 1} skipped", file=sys.stderr)
+                continue
+            gate_summary = {"clean": True, "confirm": confirm,
+                            "open_ts": open_ts}
+        sweep_start = time.time()
+        rc = subprocess.call(cmd)
         if rc != 0:
             raise BenchError(f"llama-benchy exited {rc} — see raw output")
         if not out_json.exists():
             raise BenchError(f"llama-benchy produced no JSON at {out_json}")
 
+        log_path = out_dir / f"vllm-r{i + 1}.log"
+        if dockerctl.dump_server_log(sweep_start, log_path):
+            print(f"[mjolnir]   server log → {log_path}")
+        else:
+            print(f"[mjolnir]   (vLLM log not captured — container "
+                  f"'{dockerctl.CONTAINER_NAME}' not found/running)",
+                  file=sys.stderr)
+
         raw = json.loads(out_json.read_text())
         cells = hist.parse_benchy_json(raw)
-        rec = hist.make_record(s, gate_summary, runs, warmup_runs, exact_tg,
-                               cells, str(out_json.relative_to(layout.benchmarks_dir)))
-        hist.append_record(layout.history_file, rec)
-        records.append(rec)
-        print(f"[mjolnir] sweep {i + 1}/{repeat} done → {rec['raw']} "
-              f"({len(cells)} cells)")
+        sweep_cells.append(cells)
+        sweep_gates.append(gate_summary)
+        print(f"[mjolnir] sweep {i + 1}/{repeat} done ({len(cells)} cells)")
 
-    if records:
-        _print_summary(records[-1])
+    if not sweep_cells:
+        return []
+    # One logical run = one history record: pool the per-run samples across
+    # all ``repeat`` sweeps so the chart plots a single point per run.
+    rec = hist.make_record(s, _aggregate_gates(sweep_gates), runs,
+                           warmup_runs, exact_tg, _aggregate_cells(sweep_cells),
+                           str(out_dir.relative_to(layout.benchmarks_dir)))
+    rec["repeat"] = len(sweep_cells)
+    hist.append_record(layout.history_file, rec)
+    records.append(rec)
+    _print_summary(rec)
     return records
 
 
 def _print_summary(rec: dict) -> None:
-    print(f"\n{'=' * 66}\n  {rec['backend']} — tg t/s (mean of {rec['runs']} runs/cell)\n{'=' * 66}")
+    n = rec.get("repeat", 1) * rec["runs"]
+    print(f"\n{'=' * 66}\n  {rec['backend']} — tg t/s "
+          f"(pooled over {rec.get('repeat', 1)} sweep(s) × {rec['runs']} runs = "
+          f"{n} samples/cell)\n{'=' * 66}")
     print(f"  {'context':>8} {'c=1':>9} {'c=2':>9} {'c=4':>9}")
     rows: dict[int, dict] = {}
     for c in rec["cells"]:

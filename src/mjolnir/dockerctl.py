@@ -7,6 +7,7 @@ a *custom* image (the sm_110 patch stack + the FA4 GEMV decode kernel) —
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -225,3 +226,34 @@ def logs(s: Settings, follow: bool = False, tail: int = 100) -> int:
         return subprocess.call(args)
     except KeyboardInterrupt:
         return 0
+
+
+# ANSI escape sequences: CSI (SGR colors, cursor moves) + OSC (e.g. hyperlinks).
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
+
+def dump_server_log(since_epoch: float, out_path: Path) -> bool:
+    """Capture the vLLM container's logs since ``since_epoch`` (unix seconds)
+    to ``out_path``, with ANSI colors stripped. Best-effort: returns ``False``
+    (no raise) when the container is absent/not running or docker fails — a
+    log capture failure never fails the bench."""
+    if not container_running():
+        return False
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S.000000000Z",
+                       time.gmtime(since_epoch))
+    try:
+        with out_path.open("w") as f:
+            subprocess.run([_docker(), "logs", "--since", ts, CONTAINER_NAME],
+                           stdout=f, stderr=f, check=False)
+    except (OSError, DockerError):
+        return False
+    try:
+        out_path.write_text(_strip_ansi(out_path.read_text()))
+    except OSError:
+        return False
+    return True

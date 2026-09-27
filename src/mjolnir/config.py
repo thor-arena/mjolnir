@@ -165,6 +165,7 @@ class Settings:
     port: int = field(default_factory=lambda: _env_int("MJOLNIR_PORT", DEFAULT_PORT))
     gemv: bool = True                      # VLLM_FA4_HD256_GEMV default on: the kernel is the point
     data_dir: Path = field(default_factory=lambda: Path("~/.local/share/mjolnir").expanduser())
+    label: str | None = None              # explicit backend-label override (history log); else derived from quant
 
     @property
     def config_path(self) -> Path:
@@ -201,7 +202,9 @@ class Settings:
 
     @property
     def backend_label(self) -> str:
-        return BACKEND_LABELS.get(self.quant, self.quant)
+        """Explicit --label override if set, else the friendly name for the
+        quant config (BACKEND_LABELS), else the quant string itself."""
+        return self.label or BACKEND_LABELS.get(self.quant, self.quant)
 
 
 def resolve(cli_model: str | None, cli_quant: str | None,

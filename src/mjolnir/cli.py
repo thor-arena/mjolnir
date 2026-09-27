@@ -605,7 +605,6 @@ def bench_ab(backends: str = typer.Option(f"{DEFAULT_QUANT},{BASELINE_QUANT}",
         s.model = leg_model
         s.image = leg_image
         s.quant = quant
-        s.backend_label = BACKEND_LABELS.get(quant, quant)
         typer.secho(f"\n{'=' * 62}\n  A/B leg: {leg_model}/{quant}  "
                     f"(image {leg_image})\n"
                     f"{'=' * 62}", fg=typer.colors.CYAN)

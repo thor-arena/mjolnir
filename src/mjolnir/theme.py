@@ -73,5 +73,7 @@ def legend(ax, handles, labels, ncols: int = 1):
 
 
 def errorbar_kwargs(color: str) -> dict:
+    # No zorder here — the call site sets it explicitly (avoids a duplicate
+    # kwarg).
     return dict(ecolor=color, elinewidth=1.2, capsize=4, capthick=1.2,
-                alpha=0.9, zorder=4)
+                alpha=0.9)
