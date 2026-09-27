@@ -48,25 +48,25 @@ here.
    `$MJOLNIR_LITELLM_DATA`). The command group is only enabled by the
    template's existence (up/config); down/status/logs work on the running
     stack. FAQ: `docs/faq/litellm-proxy.md`.
-- **Thor HW setup (`mjolnir hw`)**: one-time, idempotent host provisioning —
-   `hw setup` runs `scripts/hw/fan-profiles.sh`: dumps the untouched
-   `/etc/nvfancontrol.conf` to `/etc/nvfancontrol.conf.bck` (first run only —
-   the .bck always holds the original, the rollback point), injects the two
-   tuned Thor fan profiles `recommended` + `max` (per-profile gated — never
-   duplicated if already present), selects the fan mode
-   `FAN_DEFAULT_PROFILE recommended` (instead of the stock `cool`), and
-   restarts `nvfancontrol`. **Run before any fan-mode selection or
-   benchmarking**; sudo where needed. `hw status` shows the installed
-   profiles/default/backup (no sudo). `--dry-run` diffs the transform on a
-   scratch copy without touching /etc.
-- **The `mjolnir` CLI is shippable**: `setup` (Thor host pre-config — the
-  ported HW setup: headless boot target, apt upgrade, Docker + NVIDIA
-  default runtime, pip, jtop, 32 GB swap, fan profile, service cleanup,
-  locked clocks, MAXN power mode; idempotent, needs sudo), `serve`,
-  `bench perf|ab|kernel`, `hw`,
-   `model` / `image` (bare = arrow-key picker over `configs/` / local docker
-   images), `vfa prepare`, `verify`, `plot`, `history`, `litellm` — defaults
-  bake in FA4 + GEMV-on for `Qwen/Qwen3.8-27B` / `NVFP4_FA4hd256`, port 6001.
+ - **Thor HW setup (`mjolnir hw`)**: one-time, idempotent host
+   provisioning — `hw setup` runs `scripts/hw/setup-thor.sh` (the ported
+   ~/thor setup script, self-contained, Thor-only), 10 gated steps:
+   headless boot target, apt upgrade, Docker + NVIDIA default runtime,
+   pip, jtop, 32 GB swap (zRAM off), **fan** (installs the tuned
+   `recommended` + `max` profiles into `/etc/nvfancontrol.conf`, per-profile
+   gated; untouched conf backed up to `.bck` first run only — the rollback
+   point; selects `FAN_DEFAULT_PROFILE` = `recommended` by default),
+   service cleanup, locked max clocks, MAXN power mode. `--fan-profile
+   recommended|max|cool|quiet`, `--skip <steps>`, `--dry-run` (plan only).
+   **Run before serving or benchmarking**; sudo where needed. `hw status`
+   shows the installed profiles/default/backup (no sudo). Conf path
+   overridable for testing via `MJOLNIR_NVFANCONF` (also honored by
+   `hw status`).
+ - **The `mjolnir` CLI is shippable**: `serve`,
+   `bench perf|ab|kernel`, `hw` (Thor host pre-config — see below),
+    `model` / `image` (bare = arrow-key picker over `configs/` / local docker
+    images), `vfa prepare`, `verify`, `plot`, `history`, `litellm` — defaults
+   bake in FA4 + GEMV-on for `Qwen/Qwen3.8-27B` / `NVFP4_FA4hd256`, port 6001.
   Selections persist to `$MJOLNIR_STATE` (default `~/.mjolnir-state.json`:
   model + quant + image); precedence: CLI flag > state > `$MJOLNIR_*` >
   baked-in default.
@@ -104,9 +104,10 @@ or run it as a CLI; do not copy its logic into a new bench.
   aarch64 nightly) + `patches/` (14 hand-adapted patches) +
   `apply_patches.py` + `verify_patches.py` (the authoritative build gate) +
   `PATCHES.md` (the per-patch inventory) + canary scripts.
-- `scripts/` — host-level scripts; `setup-thor.sh` is the Thor HW
-  pre-configuration the `mjolnir setup` command runs (port of the ~/thor
-  setup script; self-contained, Thor-only, idempotent).
+ - `scripts/hw/` — host HW scripts; `setup-thor.sh` is the Thor HW
+   pre-configuration the `mjolnir hw setup` command runs (port of the ~/thor
+   setup script + the tuned fan profiles merged in; self-contained,
+   Thor-only, idempotent).
 - `docker/vllm-thor/fa4-gemv-kernel/` — the **GEMV decode kernel package**
   (kernel source + `interface-gemv-dispatch.diff` reference + bench/verify
   scripts + docs). Ships **default-on** in the image (see Current state).

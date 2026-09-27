@@ -1,6 +1,7 @@
 """The ``mjolnir`` CLI — one command surface for the whole repo.
 
-    mjolnir setup                       pre-configure the Thor host hardware
+    mjolnir hw setup|status             pre-configure the Thor host (HW
+                                        provisioning, idempotent)
     mjolnir serve up|down|status|logs    drive the vLLM container
     mjolnir model [use|list]            active model/config (bare = arrow-key
                                         picker over configs/)
@@ -97,10 +98,12 @@ litellm_app = typer.Typer(
          "docker/litellm/).",
      no_args_is_help=True, context_settings=_HELP_CTX)
 hw_app = typer.Typer(
-    help="Thor host hardware setup — one-time, idempotent provisioning steps "
-         "that run on the host (sudo where needed), e.g. the fan-profile "
-         "install. 'hw setup' must run before any fan-mode selection or "
-         "benchmarking.",
+    help="Thor host pre-configuration — one-time, idempotent provisioning "
+         "(sudo where needed): headless boot target, apt upgrade, Docker + "
+         "NVIDIA default runtime, pip, jtop, swap, fan profiles "
+         "(recommended + max installed, default selected), service "
+         "cleanup, locked clocks, MAXN power mode. Run 'hw setup' before "
+         "serving or benchmarking.",
     no_args_is_help=True, context_settings=_HELP_CTX)
 
 app = typer.Typer(
@@ -147,54 +150,6 @@ def _settings(model: Optional[str], quant: Optional[str],
     s = resolve(model or st.get("model"), quant or st.get("quant"),
                 image or st.get("image"), port, gemv)
     return s
-
-
-# ── setup ───────────────────────────────────────────────────────────────────
-
-@app.command("setup")
-def setup_cmd(yes: bool = typer.Option(False, "--yes", "-y",
-                                      help="don't prompt to continue"),
-              upgrade: bool = typer.Option(True, "--upgrade/--no-upgrade",
-                                           help="apt update + full-upgrade "
-                                                "(default on — the original "
-                                                "script's NVIDIA-carrier path)"),
-              keep_gui: bool = typer.Option(False, "--keep-gui",
-                                            help="keep the graphical boot "
-                                                 "target (default: headless "
-                                                 "multi-user)"),
-              fan_profile: str = typer.Option("cool", "--fan-profile",
-                                              help="cool|quiet (default "
-                                                   "cool; applied only if "
-                                                   "nvfancontrol is "
-                                                   "configured)"),
-              swap_size: int = typer.Option(32, "--swap-size",
-                                            help="swap file size in GB "
-                                                 "(default 32 — the 128 GB "
-                                                 "Thor SoM)"),
-              skip: str = typer.Option("", "--skip",
-                                       help="comma-separated steps to skip: "
-                                            "gui,upgrade,pip,docker,jtop,"
-                                            "memory,fan,host,clocks,power"),
-              reboot: bool = typer.Option(False, "--reboot",
-                                         help="reboot at the end if a step "
-                                              "required one (non-interactive)"),
-              dry_run: bool = typer.Option(False, "--dry-run",
-                                          help="print the plan, change "
-                                              "nothing")):
-    """Pre-configure the Thor host (port of the ~/thor HW setup script).
-
-    Runs ``scripts/setup-thor.sh``: headless boot target, apt upgrade,
-    Docker + NVIDIA default runtime, pip, jtop, 32 GB swap (zRAM off),
-    fan profile, service cleanup, locked max clocks, MAXN power mode.
-    Idempotent — safe to re-run; the script asks for sudo."""
-    try:
-        rc = thor.run_setup(yes=yes, upgrade=upgrade, keep_gui=keep_gui,
-                            fan_profile=fan_profile, swap_size=swap_size,
-                            skip=skip, reboot=reboot, dry_run=dry_run)
-    except (ValueError, FileNotFoundError) as e:
-        typer.secho(str(e), fg=typer.colors.RED, err=True)
-        raise typer.Exit(4)
-    raise typer.Exit(rc)
 
 
 # ── serve ───────────────────────────────────────────────────────────────────
@@ -594,26 +549,54 @@ def litellm_config(model: Optional[str] = typer.Option(None, "--model"),
 # ── hw ─────────────────────────────────────────────────────────────────────
 
 @hw_app.command("setup")
-def hw_setup(dry_run: bool = typer.Option(
-        False, "--dry-run",
-        help="transform on a scratch copy and show the diff — no sudo, no "
-             "writes to /etc")):
-    """One-time, idempotent fan-profile install.
+def hw_setup(yes: bool = typer.Option(False, "--yes", "-y",
+                                      help="don't prompt to continue"),
+             upgrade: bool = typer.Option(True, "--upgrade/--no-upgrade",
+                                          help="apt update + full-upgrade "
+                                               "(default on — the original "
+                                               "script's NVIDIA-carrier "
+                                               "path)"),
+             keep_gui: bool = typer.Option(False, "--keep-gui",
+                                           help="keep the graphical boot "
+                                                "target (default: headless "
+                                                "multi-user)"),
+             fan_profile: str = typer.Option("recommended", "--fan-profile",
+                                            help="recommended (default) | "
+                                                 "max | cool | quiet — "
+                                                 "recommended/max are "
+                                                 "installed by this step if "
+                                                 "missing"),
+             swap_size: int = typer.Option(32, "--swap-size",
+                                           help="swap file size in GB "
+                                                "(default 32 — the 128 GB "
+                                                "Thor SoM)"),
+             skip: str = typer.Option("", "--skip",
+                                      help="comma-separated steps to skip: "
+                                           "gui,upgrade,pip,docker,jtop,"
+                                           "memory,fan,host,clocks,power"),
+             reboot: bool = typer.Option(False, "--reboot",
+                                        help="reboot at the end if a step "
+                                             "required one (non-interactive)"),
+             dry_run: bool = typer.Option(False, "--dry-run",
+                                         help="print the plan, change "
+                                              "nothing")):
+    """Pre-configure the Thor host (port of the ~/thor HW setup script).
 
-    Injects the `recommended` and `max` fan profiles into
-    /etc/nvfancontrol.conf (each gated — never duplicated if already
-    present), dumps the untouched conf to /etc/nvfancontrol.conf.bck on
-    first run (the .bck always holds the original — the rollback point),
-    then selects the fan mode `recommended` (instead of the stock `cool`)
-    and restarts nvfancontrol. Run this before any fan-mode selection or
-    benchmarking."""
-    script = load_layout().repo_root / "scripts" / "hw" / "fan-profiles.sh"
-    if not script.exists():
-        typer.secho(f"setup script not found: {script}", fg=typer.colors.RED,
-                    err=True)
+    Runs ``scripts/hw/setup-thor.sh``: headless boot target, apt upgrade,
+    Docker + NVIDIA default runtime, pip, jtop, 32 GB swap (zRAM off),
+    the fan profiles (``recommended`` + ``max`` installed per-profile
+    gated, with the .bck rollback backup; default selected —
+    ``recommended`` by default), service cleanup, locked max clocks,
+    MAXN power mode. Idempotent — safe to re-run; the script asks for
+    sudo."""
+    try:
+        rc = thor.run_setup(yes=yes, upgrade=upgrade, keep_gui=keep_gui,
+                            fan_profile=fan_profile, swap_size=swap_size,
+                            skip=skip, reboot=reboot, dry_run=dry_run)
+    except (ValueError, FileNotFoundError) as e:
+        typer.secho(str(e), fg=typer.colors.RED, err=True)
         raise typer.Exit(4)
-    args = ["bash", str(script)] + (["--dry-run"] if dry_run else [])
-    raise typer.Exit(subprocess.call(args))
+    raise typer.Exit(rc)
 
 
 @hw_app.command("status")

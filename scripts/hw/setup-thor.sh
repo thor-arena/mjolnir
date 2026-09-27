@@ -8,13 +8,17 @@
 # CI branches. This is for a physical box and needs sudo. Every step is
 # idempotent — re-running where already configured is a no-op.
 #
-# Preferred entry point: `mjolnir setup` (maps CLI flags to the options
+# The fan step also installs the two tuned performance fan profiles
+# (`recommended` + `max`, per-profile gated, with the .bck rollback point)
+# and selects the default — see the FAN section below.
+#
+# Preferred entry point: `mjolnir hw setup` (maps CLI flags to the options
 # below):
 #
 #   -y, --yes              don't prompt before starting
 #   --no-upgrade           skip apt update + full-upgrade (default: run)
 #   --keep-gui             don't switch the boot target to multi-user
-#   --fan-profile <p>      cool (default) | quiet
+#   --fan-profile <p>      recommended (default) | max | cool | quiet
 #   --swap-size <GB>       swap file size (default: 32)
 #   --skip <a,b,c>         skip steps: gui,upgrade,pip,docker,jtop,
 #                          memory,fan,host,clocks,power
@@ -33,7 +37,7 @@ REBOOT_REQUIRED=0
 ASSUME_YES=0
 UPGRADE=1
 KEEP_GUI=0
-FAN_PROFILE="cool"
+FAN_PROFILE="recommended"
 SWAP_SIZE=32
 SKIP=""
 DO_REBOOT=0
@@ -821,45 +825,161 @@ configure_gui() {
     fi
 }
 
-# Usage: set_fan_profile <quiet|cool>
-set_fan_profile() {
-  local desired="${1:-cool}"
+# ================================================================================
+# FAN (merged from scripts/hw/fan-profiles.sh — one process with the rest)
+#
+# 1. BACKUP (first run only): untouched $CONF is dumped to $CONF.bck.
+#    The .bck ALWAYS holds the original — the clean rollback point.
+# 2. INJECT (per-profile gated): the two performance fan profiles
+#    (tuned on the AGX Thor) are inserted before the THERMAL_GROUP
+#    section — each ONLY if its block is not already present:
+#      FAN_PROFILE recommended  — balanced warmth/acoustics
+#      FAN_PROFILE max          — sustained full-load cooling (bench)
+# 3. FAN MODE SELECTION: FAN_DEFAULT_PROFILE <--fan-profile> (default
+#    "recommended", not the stock "cool").
+# 4. Restart nvfancontrol and print the daemon's active state.
+# ================================================================================
 
-  if ! file_exists /etc/nvfancontrol.conf; then
+FAN_CONF="${MJOLNIR_NVFANCONF:-/etc/nvfancontrol.conf}"
+
+write_fan_profile_blocks() {
+  local dir="$1"
+  cat > "$dir/profile_recommended.conf" <<'EOF'
+	FAN_PROFILE recommended {
+		#TEMP	  HYST	PWM	RPM
+		0	   0	255	5371
+		10	   0	220	4700
+		20	   0	180	3900
+		30	   0	140	3000
+		40	   0	102	2400
+		55	   0	90	2100
+		70	   0	80	1800
+		115	   0	80	1800
+	}
+EOF
+
+  cat > "$dir/profile_max.conf" <<'EOF'
+	FAN_PROFILE max {
+		#TEMP	  HYST	PWM	RPM
+		0	   0	255	5371
+		15	   0	240	5000
+		25	   0	220	4700
+		35	   0	195	4200
+		50	   0	170	3700
+		70	   0	120	2700
+		115	   0	120	2700
+	}
+EOF
+}
+
+# $1=src $2=dst — inserts the missing profile block(s) before the
+# THERMAL_GROUP anchor and selects the fan mode (FAN_DEFAULT_PROFILE).
+fan_transform() {
+  awk -v do_rec="$DO_REC" -v do_max="$DO_MAX" -v sel="$FAN_PROFILE" \
+      -v src="$1" \
+      -v f_rec="$FAN_TMP/profile_recommended.conf" \
+      -v f_max="$FAN_TMP/profile_max.conf" '
+    /^[[:space:]]*FAN_DEFAULT_PROFILE/ { sub(/FAN_DEFAULT_PROFILE.*/, "FAN_DEFAULT_PROFILE " sel) }
+    !done && $0 ~ /^[[:space:]]*THERMAL_GROUP[[:space:]]0/ {
+      done=1
+      if (do_rec) while ((getline l < f_rec) > 0) print l
+      if (do_max) while ((getline l < f_max) > 0) print l
+    }
+    { print }
+    END {
+      if (!done) {
+        print "setup-thor: no THERMAL_GROUP anchor in " src " — refusing to guess" > "/dev/stderr"
+        exit 3
+      }
+    }
+  ' "$1" > "$2"
+}
+
+do_fan() {
+  local conf="$FAN_CONF"
+  local bck="$conf.bck"
+
+  if ! file_exists "$conf"; then
+    echo "ℹ️  No nvfancontrol conf at $conf — skipping fan."
     return 0
-  fi
-
-  if [[ -z "$desired" ]]; then
-    echo "Usage: $0 <quiet|cool>"
-    return 1
   fi
 
   if ! is_command_available nvfancontrol; then
-    echo "ℹ️  nvfancontrol not available — skipping fan profile."
+    echo "ℹ️  nvfancontrol not available — skipping fan."
     return 0
   fi
 
-  # 1) Read the current live profile
-  local current
-  current=$(sudo nvfancontrol -q 2>/dev/null | awk -F: '/FAN1:FAN_PROFILE/ {print $3}')
+  local have_rec have_max cur_default
+  have_rec=$(grep -cE "FAN_PROFILE recommended[[:space:]]*\{" "$conf" || true)
+  have_max=$(grep -cE "FAN_PROFILE max[[:space:]]*\{" "$conf" || true)
+  cur_default="$(awk '/^[[:space:]]*FAN_DEFAULT_PROFILE/ {print $2; exit}' "$conf")"
+  cur_default="${cur_default:-<unset>}"
 
-  # 2) Compare and, if needed, rewrite config + restart daemon
-  if [[ "$current" != "$desired" ]]; then
-    systemctl_stop_service nvfancontrol
+  local do_rec=0 do_max=0
+  [ "$have_rec" -eq 0 ] && do_rec=1
+  [ "$have_max" -eq 0 ] && do_max=1
+  DO_REC=$do_rec
+  DO_MAX=$do_max
 
-    # Edit the default in the config file
-    sudo sed -i "s/FAN_DEFAULT_PROFILE .*/FAN_DEFAULT_PROFILE $desired/" /etc/nvfancontrol.conf \
-      || { echo "❌ Failed to update /etc/nvfancontrol.conf"; return 2; }
+  # Stock profiles ship with the L4T conf; recommended/max are installed here.
+  case "$FAN_PROFILE" in
+    cool|quiet)
+      if ! grep -qE "FAN_PROFILE ${FAN_PROFILE}[[:space:]]*\{" "$conf"; then
+        echo "❌ fan profile '$FAN_PROFILE' not in $conf" >&2
+        return 1
+      fi
+      ;;
+  esac
 
-    # Remove the old status so the daemon reloads fresh
-    sudo rm -f /var/lib/nvfancontrol/status
+  local pending=0
+  [ -e "$bck" ] || pending=1
+  [ "$do_rec" = 1 ] && pending=1
+  [ "$do_max" = 1 ] && pending=1
+  [ "$cur_default" != "$FAN_PROFILE" ] && pending=1
 
-    # Restart the service to pick up the new profile
-    systemctl_start_service nvfancontrol \
-      && echo "✅ Fan profile was set to '$desired'."
+  echo "fan profiles: $conf"
+  if [ -e "$bck" ]; then
+    echo "  backup:      $bck (exists — original preserved)"
   else
-    echo "✅ Fan profile already set to '$desired'."
+    echo "  backup:      $conf -> $bck (first run — will be created)"
   fi
+  if [ "$do_rec" = 1 ]; then
+    echo "  inject:      FAN_PROFILE recommended (not present — will be added)"
+  else
+    echo "  inject:      FAN_PROFILE recommended (already present — skipped)"
+  fi
+  if [ "$do_max" = 1 ]; then
+    echo "  inject:      FAN_PROFILE max (not present — will be added)"
+  else
+    echo "  inject:      FAN_PROFILE max (already present — skipped)"
+  fi
+  if [ "$cur_default" != "$FAN_PROFILE" ]; then
+    echo "  fan mode:    FAN_DEFAULT_PROFILE $cur_default -> $FAN_PROFILE"
+  else
+    echo "  fan mode:    FAN_DEFAULT_PROFILE $FAN_PROFILE (already selected)"
+  fi
+
+  if [ "$pending" = 0 ]; then
+    echo "✅ Fan already configured (profile: $FAN_PROFILE)."
+    return 0
+  fi
+
+  FAN_TMP="$(mktemp -d)"
+  trap 'rm -rf "$FAN_TMP"' EXIT
+  write_fan_profile_blocks "$FAN_TMP"
+
+  # First run only: the .bck always holds the untouched original.
+  [ -e "$bck" ] || sudo cp -a -- "$conf" "$bck"
+  fan_transform "$conf" "$FAN_TMP/new.conf"
+  sudo cp -- "$FAN_TMP/new.conf" "$conf"
+
+  # Remove the old status so the daemon reloads fresh, then restart.
+  sudo rm -f /var/lib/nvfancontrol/status
+  systemctl_restart_service nvfancontrol
+
+  echo "✅ Fan profile installed; default: $FAN_PROFILE."
+  echo "  active state:"
+  sudo nvfancontrol -q 2>&1 | grep -iE 'profile|governor' | sed 's/^/    /' || true
 }
 
 # ================================================================================
@@ -1038,7 +1158,7 @@ print_plan() {
     _plan docker   "docker-ce + nvidia-container-toolkit, user in docker group, nvidia default runtime, service up + enabled"
     _plan jtop     "jetson-stats (jtop)"
     _plan memory   "${SWAP_SIZE} GB swap file at /mnt (zRAM off)"
-    _plan fan      "nvfancontrol profile: ${FAN_PROFILE}"
+    _plan fan      "install recommended+max fan profiles (gated, .bck backup), FAN_DEFAULT_PROFILE: ${FAN_PROFILE}"
     _plan host     "disable nvargus-daemon / cups / ModemManager"
     _plan clocks   "jetson_clocks.service (lock max CPU/GPU/EMC clocks)"
     _plan power    "nvpmodel → MAXN/SUPER (reboot to apply)"
@@ -1124,7 +1244,7 @@ fi
 if is_skipped fan; then
     echo "ℹ️  Skipping: fan"
 else
-    set_fan_profile "$FAN_PROFILE"
+    do_fan
 fi
 
 # 8. Host service cleanup

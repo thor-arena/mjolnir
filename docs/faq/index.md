@@ -10,7 +10,7 @@ trust or publish any number.
 
 | Story | File |
 |---|---|
-| Pre-configure a fresh Jetson Thor for mjolnir (`mjolnir setup`) | [setup-thor.md](setup-thor.md) |
+| Pre-configure a fresh Jetson Thor for mjolnir (`mjolnir hw setup`) | [setup-thor.md](setup-thor.md) |
 
 ## Serving & defaults
 

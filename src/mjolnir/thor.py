@@ -1,11 +1,12 @@
-"""``mjolnir setup`` — Jetson AGX Thor host pre-configuration.
+"""``mjolnir hw setup`` — Jetson AGX Thor host pre-configuration.
 
-The ported Thor HW setup (``scripts/setup-thor.sh``, from the ~/thor
+The ported Thor HW setup (``scripts/hw/setup-thor.sh``, from the ~/thor
 scripts) brings a box to the serving baseline the rest of the CLI
 assumes: headless boot target, apt upgrade, Docker with the NVIDIA
-runtime as default, pip, jtop, a 32 GB swap file (zRAM off), the cool
-fan profile, trimmed host services, locked max clocks, and the MAXN
-power mode. Every step is idempotent.
+runtime as default, pip, jtop, a 32 GB swap file (zRAM off), the fan
+profiles (``recommended`` + ``max`` installed, default selected — the
+default profile is ``recommended``), trimmed host services, locked max
+clocks, and the MAXN power mode. Every step is idempotent.
 
 This module only locates and runs the script: flags map 1:1 to its
 options, and ``--dry-run`` previews the plan without touching the box.
@@ -24,22 +25,23 @@ STEPS: tuple[str, ...] = (
     "memory", "fan", "host", "clocks", "power",
 )
 
-FAN_PROFILES: tuple[str, ...] = ("cool", "quiet")
+FAN_PROFILES: tuple[str, ...] = ("recommended", "max", "cool", "quiet")
+DEFAULT_FAN_PROFILE = "recommended"
 
 
 def setup_script() -> Path:
-    """The ported setup script (the repo's ``scripts/setup-thor.sh``)."""
-    p = find_repo_root() / "scripts" / "setup-thor.sh"
+    """The ported setup script (the repo's ``scripts/hw/setup-thor.sh``)."""
+    p = find_repo_root() / "scripts" / "hw" / "setup-thor.sh"
     if not p.is_file():
         raise FileNotFoundError(f"setup script not found: {p}")
     return p
 
 
 def build_cmd(yes: bool = False, upgrade: bool = True, keep_gui: bool = False,
-              fan_profile: str = "cool", swap_size: int = 32,
+              fan_profile: str = DEFAULT_FAN_PROFILE, swap_size: int = 32,
               skip: str = "", reboot: bool = False,
               dry_run: bool = False) -> list[str]:
-    """The ``bash scripts/setup-thor.sh ...`` argv for the given flags."""
+    """The ``bash scripts/hw/setup-thor.sh ...`` argv for the given flags."""
     if fan_profile not in FAN_PROFILES:
         raise ValueError(
             f"bad --fan-profile '{fan_profile}' "
@@ -70,7 +72,7 @@ def build_cmd(yes: bool = False, upgrade: bool = True, keep_gui: bool = False,
 
 
 def run_setup(*, yes: bool = False, upgrade: bool = True, keep_gui: bool = False,
-              fan_profile: str = "cool", swap_size: int = 32,
+              fan_profile: str = DEFAULT_FAN_PROFILE, swap_size: int = 32,
               skip: str = "", reboot: bool = False,
               dry_run: bool = False) -> int:
     """Run the Thor setup script; return its exit code (0 = done)."""
