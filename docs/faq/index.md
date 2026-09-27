@@ -15,6 +15,7 @@ trust or publish any number.
 | Change the default model / quant config | [default-model-quant.md](default-model-quant.md) |
 | Add a new model config (repo or user-local, persisted at `~/`) | [new-model-config.md](new-model-config.md) |
 | What wins: flag, state, env var, or baked-in default? | [settings-precedence.md](settings-precedence.md) |
+| Run the LiteLLM proxy stack (independent of the vLLM server) | [litellm-proxy.md](litellm-proxy.md) |
 
 ## Benchmarking
 
