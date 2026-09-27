@@ -39,14 +39,17 @@ def prepare_vfa_tree(s: Settings, out: Path | None = None,
     print(f"[mjolnir] preparing GEMV'd vfa tree at {out} (image: {img})")
     out.mkdir(parents=True, exist_ok=True)
 
-    # 1. extract the in-image vllm_flash_attn tree. --user keeps the copied
-    #    files owned by the host user (a root-extracted tree would be
-    #    un-writable for the host user editing it).
+    # 1. extract the in-image vllm_flash_attn tree. Runs as root (NOT
+    #    --user): a previously-benched tree is left with root-owned
+    #    __pycache__/ (bench containers run as root and import the mounted
+    #    tree), which the host user can't delete — so the ``rm -rf`` must be
+    #    root. ``chown -R`` then hands the fresh copy to the host user so it
+    #    stays editable for kernel iteration.
     extract = ["docker", "run", "--rm",
                "-v", f"{out}:/out",
-               "--user", f"{os.getuid()}:{os.getgid()}",
                "--entrypoint", "bash", img, "-lc",
-               f"rm -rf /out/vllm_flash_attn && cp -r {VFA_DIST_PATH} /out/vllm_flash_attn"]
+               f"rm -rf /out/vllm_flash_attn && cp -r {VFA_DIST_PATH} /out/vllm_flash_attn"
+               f" && chown -R {os.getuid()}:{os.getgid()} /out/vllm_flash_attn"]
     print("[mjolnir]   extracting the in-image vllm_flash_attn tree …",
           file=sys.stderr)
     if subprocess.call(extract, stdout=subprocess.DEVNULL) != 0:

@@ -1,0 +1,111 @@
+{
+  "env": {
+    "device": "NVIDIA Thor",
+    "capability": [
+      11,
+      0
+    ],
+    "sms": 20,
+    "torch": "2.13.0+cu130",
+    "interface_sha256": "3bd842584edc862b98fe2e657975a837ac291f845b3127c10a537972d2507b68",
+    "gemv_sha256": "75bad8a6781b69a23d0b257a2cae9d43caf7c0a7233f919045b285fa8e5667bc",
+    "L": 8192,
+    "warmup": 20,
+    "iters": 300,
+    "kv_bytes": 16777216,
+    "roofline_bw_bytes_per_s": 273000000000.0,
+    "gate": {
+      "poll_s": 2.0,
+      "confirm_00_streak": 6
+    }
+  },
+  "window": {
+    "start": 1790501047.300394,
+    "end": 1790501048.8967974,
+    "clean": true,
+    "num_samples": 1,
+    "dirty_samples": [],
+    "server_load_before_wait": [
+      0.0,
+      0.0
+    ],
+    "server_load_at_end": [
+      0.0,
+      0.0
+    ]
+  },
+  "results": {
+    "st16_ns1": {
+      "median": 1304.912,
+      "p95": 1321.6,
+      "min": 1287.456,
+      "mean": 1307.902,
+      "iters": 300,
+      "bw_gbs_nominal_kv": 12.86
+    },
+    "st16_ns4": {
+      "median": 367.744,
+      "p95": 382.752,
+      "min": 323.968,
+      "mean": 369.864,
+      "iters": 300,
+      "bw_gbs_nominal_kv": 45.62
+    },
+    "st16_ns8": {
+      "median": 315.296,
+      "p95": 325.632,
+      "min": 309.056,
+      "mean": 316.882,
+      "iters": 300,
+      "bw_gbs_nominal_kv": 53.21
+    },
+    "st16_ns20": {
+      "median": 223.424,
+      "p95": 235.904,
+      "min": 215.904,
+      "mean": 225.424,
+      "iters": 300,
+      "bw_gbs_nominal_kv": 75.09
+    },
+    "st16_ns64": {
+      "median": 235.792,
+      "p95": 254.56,
+      "min": 193.216,
+      "mean": 238.969,
+      "iters": 300,
+      "bw_gbs_nominal_kv": 71.15
+    },
+    "st16_auto": {
+      "median": 226.88,
+      "p95": 250.08,
+      "min": 222.528,
+      "mean": 230.567,
+      "iters": 300,
+      "bw_gbs_nominal_kv": 73.95
+    },
+    "st2_ns1": {
+      "median": 1275.648,
+      "p95": 1300.768,
+      "min": 1270.944,
+      "mean": 1279.753,
+      "iters": 300,
+      "bw_gbs_nominal_kv": 13.15
+    },
+    "st2_ns20": {
+      "median": 222.464,
+      "p95": 236.768,
+      "min": 215.904,
+      "mean": 225.113,
+      "iters": 300,
+      "bw_gbs_nominal_kv": 75.42
+    },
+    "flashinfer": {
+      "median": 190.576,
+      "p95": 218.656,
+      "min": 183.808,
+      "mean": 194.751,
+      "iters": 300,
+      "bw_gbs_nominal_kv": 88.03
+    }
+  }
+}

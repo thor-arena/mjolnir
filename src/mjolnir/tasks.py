@@ -121,10 +121,12 @@ def build_docker(task: Task, s: Settings, vfa_tree: Path, workdir: Path,
         cmd += ["--gpus", "all"]
     if task.kind == "bench":
         # Host networking: the clean-window gate polls 127.0.0.1:<port>
-        # from INSIDE the container.
+        # from INSIDE the container. The gate URL (which port) is passed via
+        # env so ``mjolnir bench kernel --port <p>`` targets the live server.
         cmd += ["--network", "host", "--entrypoint", "python3"]
         cmd += ["-v", f"{vfa_tree}:{VFA_DIST_PATH}"]
         cmd += ["-v", f"{workdir}:/p"]
+        cmd += ["-e", f"MJOLNIR_METRICS_URL={s.metrics_url}"]
         if task.tmpdir:
             cmd += ["-e", f"TMPDIR={task.tmpdir}"]
         cmd += [s.image, f"/p/{task_script(task, s).name}"] + list(extra)
@@ -165,16 +167,31 @@ def run_task(s: Settings, name: str, script_args: list[str],
     if task.kind == "bench":
         workdir = workdir or root / GEMV_DIR_RELPATH
         if vfa_tree is None:
-            # ``vfa prepare`` writes <root>/vfa-tree/vllm_flash_attn — mount
-            # the package dir itself (the mount target is the in-image
-            # package path).
-            default_vfa = root / "vfa-tree" / "vllm_flash_attn"
-            vfa_tree = default_vfa if default_vfa.exists() else None
-            if vfa_tree is None:
-                print("[mjolnir] no GEMV'd vfa tree — prepare it first:\n"
-                      "  mjolnir vfa prepare\n"
-                      "(or pass --vfa-tree <path>)", file=sys.stderr)
-                return 4
+            if dry_run:
+                # Preview only — no container, no rebuild: reuse the cached
+                # tree (the mount path is identical either way).
+                default_vfa = root / "vfa-tree" / "vllm_flash_attn"
+                vfa_tree = default_vfa if default_vfa.exists() else None
+                if vfa_tree is None:
+                    print("[mjolnir] no GEMV'd vfa tree — prepare it first:\n"
+                          "  mjolnir vfa prepare\n"
+                          "(or pass --vfa-tree <path>)", file=sys.stderr)
+                    return 4
+            else:
+                # Real run: ALWAYS (re)build the default GEMV'd tree, so a run
+                # measures the current kernel source of truth (fa4-gemv-kernel/)
+                # + current image, never a stale cached copy. Cheap — an
+                # in-image cp + kernel drop + dispatch hunk, no image build.
+                # Pass --vfa-tree <path> to opt out (use that tree as-is).
+                from mjolnir import vfa
+                default_out = root / "vfa-tree"
+                print("[mjolnir] (re)preparing GEMV'd vfa tree (always "
+                      "fresh) …", file=sys.stderr)
+                try:
+                    vfa_tree = vfa.prepare_vfa_tree(s, default_out, img)
+                except RuntimeError as e:
+                    print(f"[mjolnir] {e}", file=sys.stderr)
+                    return 4
         else:
             vfa_tree = Path(vfa_tree)
         if not vfa_tree.exists():

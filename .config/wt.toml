@@ -1,0 +1,100 @@
+# POST-START: Bootstraps worktree on first creation.
+# copy-ignored runs first; setup-env depends on .env being present.
+[[post-start]]
+copy = "wt step copy-ignored"
+
+[[post-start]]
+setup-env = '''
+  HASH_PORT={{ branch | hash_port }}
+  # Derive UI port by offsetting server port into [20000-29999] — zero collision risk.
+
+  # PIDS=$(ss -tlnp sport = $HASH_PORT 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | tr '\n' ' ')
+  # if [ -n "$PIDS" ]; then
+  #  echo "Stopping stale processes on port $HASH_PORT ($PIDS)..."
+  #  for pid in $PIDS; do kill -9 "$pid" 2>/dev/null || true; done
+  # fi
+
+  # Allow direnv to manage this worktree's .envrc (auto-activates .venv on cd).
+  # command -v direnv >/dev/null && direnv allow --quiet
+'''
+
+[pre-remove]
+cleanup = '''
+  PIDS=$(ss -tlnp sport = {{ branch | hash_port }} 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | tr '\n' ' ')
+  [ -n "$PIDS" ] && kill -9 $PIDS 2>/dev/null || true
+'''
+
+[commit.generation]
+template-append = """
+Convention: Conventional Commits (<type>(<scope>): <subject>)
+Allowed Types: feat, fix, perf, refactor, test, ci, chore, docs, style, revert
+Any <scope> is accepted, eg.: llm, mcp, api, etc...
+"""
+
+[step.copy-ignored]
+exclude = ["task/", ".ruff_cache/", ".venv/"]
+
+[aliases]
+# Stage staged changes and generate a conventional-commit message via wt step commit
+commit = "wt step commit"
+# Push the current branch to origin and set the upstream tracking branch
+push = "git push --set-upstream origin {{ branch }}"
+# Generate a PR description (title, summary, changes, testing notes) via Opencode LLM, targeting origin/main by default
+pr = '''
+TMPDIR="${TMPDIR:-/tmp}"
+_BASE={% if args | length > 0 %}{{ args[0] }}{% else %}origin/main{% endif %}
+_DIFF="$TMPDIR/.wt-pr-diff-$$.txt"
+_PR="$TMPDIR/.wt-pr-$$.txt"
+trap 'rm -f "$_DIFF" "$_PR"' EXIT
+
+# Keep diff ≤ 3000 lines so the prompt stays sane and avoids ARG_MAX overflow.
+git diff --no-color "$_BASE"...HEAD | head -3000 > "$_DIFF"
+
+cat > "$_PR" <<EOF
+Generate a GitHub Pull Request description in Markdown for branch '{{ branch }}' against '${_BASE}'.
+Include: title, summary, what changed and why, and testing notes.
+
+Diff:
+$(cat "$_DIFF")
+EOF
+
+bash -c '
+  set -a
+  [ -f ~/.config/opencode/.env ] && . ~/.config/opencode/.env
+  MODEL_ARGS=()
+  # Pass --model only when WORKTRUNK_LLM_MODEL is set; omit the flag entirely when unset (opencode uses its default model).
+  [ -n "${WORKTRUNK_LLM_MODEL:-}" ] && MODEL_ARGS=(--model "$WORKTRUNK_LLM_MODEL")
+  exec opencode run "${MODEL_ARGS[@]}" < "$1"
+' -- "$_PR"
+'''
+# Stop and remove a WorkTrunk branch (shorthand for wt remove)
+rm = "wt remove {{ args }}"
+# Print the local dev-server URL for the current branch's hashed port
+url = "echo http://localhost:{{ branch | hash_port }}"
+# Create a new branch checked-out from the latest origin/<base_branch> and initialise its worktree (requires <branch_name>; accepts optional <base_branch>, defaults to main)
+new = '''
+{% if args | length == 0 %}
+  echo "Missing <branch_name>!" >&2
+  exit 1
+{% elif '#' in args[0] %}
+  echo "✗ Branch name contains '#'. That breaks the Vite dev server." >&2
+  echo "  Rename to remove the '#' symbol and try again." >&2
+  exit 1
+{% else %}
+  BASE_BRANCH={% if args | length > 1 %}{{ args[1] }}{% else %}main{% endif %}
+  git fetch origin "$BASE_BRANCH" --quiet
+  wt switch --base "origin/$BASE_BRANCH" --create {{ args[0] }}
+{% endif %}
+'''
+# Full workflow shortcut: stage, commit, rebased onto main, push, and draft a PR
+ship = '''
+git add .
+wt commit
+git fetch origin main
+git merge origin/main
+wt push
+wt pr
+'''
+
+[list]
+url = "http://localhost:{{ branch | hash_port }}"

@@ -15,7 +15,7 @@
    — <em>serve LLM models on a <b>Jetson AGX Thor</b>,<br/>with a dedicated <b>FlashAttention 4</b> kernel that makes decode lightning fast.</em>
 </p>
 
-## What is this
+## Introduction
 
 Mjolnir is a patched vLLM image and a single CLI for serving LLM models on the NVIDIA Jetson AGX Thor (`sm_110a`) with a custom FlashAttention decode kernel.
 

@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import statistics
 import threading
 import time
@@ -63,7 +64,8 @@ WARMUP = 20
 ITERS = 300
 ROOFLINE_BW = 273e9  # B/s (Thor LPDDR5X, arxiv-gemv-decode.md §2.1.4)
 
-METRICS_URL = "http://127.0.0.1:6001/metrics"
+METRICS_URL = os.environ.get("MJOLNIR_METRICS_URL",
+                             "http://127.0.0.1:6001/metrics")
 POLL_S = 2.0
 CONFIRM = 3
 WAIT_TIMEOUT_S = 1800

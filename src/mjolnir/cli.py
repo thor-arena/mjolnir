@@ -622,25 +622,38 @@ def bench_ab(backends: str = typer.Option(f"{DEFAULT_QUANT},{BASELINE_QUANT}",
         typer.secho(f"(plots skipped: {e})", fg=typer.colors.YELLOW, err=True)
 
 
-@bench_app.command("kernel")
+@bench_app.command("kernel",
+                   # Pass-through: the task's own flags (--out, --mode,
+                   # --no-gate, …) are unknown to the launcher, so ignore
+                   # them here and collect them into `args` to forward
+                   # verbatim to the script.
+                   context_settings={**_HELP_CTX,
+                                     "ignore_unknown_options": True,
+                                     "allow_extra_args": True})
 def bench_kernel(task: str = typer.Argument(..., help="task name — see "
                                                      "mjolnir bench kernel "
                                                      "--help-list"),
                  args: List[str] = typer.Argument(None, help="script args "
                                                             "(passed "
                                                              "through)"),
-                 image: Optional[str] = typer.Option(None, "--image"),
-                 vfa_tree: Optional[Path] = typer.Option(None, "--vfa-tree"),
-                 dry_run: bool = typer.Option(False, "--dry-run"),
-                 skip_preflight: bool = typer.Option(False, "--skip-preflight"),
-                 help_list: bool = typer.Option(False, "--help-list",
-                                               help="list the tasks")):
+                  image: Optional[str] = typer.Option(None, "--image"),
+                  vfa_tree: Optional[Path] = typer.Option(None, "--vfa-tree"),
+                  port: Optional[int] = typer.Option(None, "--port",
+                                                     help="live vLLM server "
+                                                          "port — the "
+                                                          "clean-window gate "
+                                                          "polls "
+                                                          "127.0.0.1:<port>/metrics"),
+                  dry_run: bool = typer.Option(False, "--dry-run"),
+                  skip_preflight: bool = typer.Option(False, "--skip-preflight"),
+                  help_list: bool = typer.Option(False, "--help-list",
+                                                help="list the tasks")):
     """Run a kernel verification / benchmark (gated docker task)."""
     if help_list:
         for t in tasks.TASKS:
             typer.echo(f"  {t.name:<15} [{t.kind:<5}]  {t.desc}")
         raise typer.Exit(0)
-    s = _settings(None, None, image, None)
+    s = _settings(None, None, image, port)
     raise typer.Exit(tasks.run_task(s, task, args or [], image=image,
                                     vfa_tree=vfa_tree, dry_run=dry_run,
                                     skip_preflight=skip_preflight))

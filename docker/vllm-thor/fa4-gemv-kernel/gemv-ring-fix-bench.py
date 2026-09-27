@@ -79,7 +79,8 @@ ITERS = 300
 KV_BYTES = L * NUM_KV_HEADS * HEAD_DIM * 2  # K+V fp8 (nominal; ncu gives exact)
 ROOFLINE_BW = 273e9  # B/s (Thor LPDDR5X)
 
-METRICS_URL = "http://127.0.0.1:6001/metrics"
+METRICS_URL = os.environ.get("MJOLNIR_METRICS_URL",
+                             "http://127.0.0.1:6001/metrics")
 POLL_S = 2.0
 CONFIRM = 6  # stricter than the original 3
 WAIT_TIMEOUT_S = 3600
