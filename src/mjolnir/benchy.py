@@ -9,7 +9,7 @@ which is what the charts and the history log need.
 Protocol per ``--repeat`` sweep (all inside one clean-window gate):
   llama-benchy --base-url ... --model ... \
     --pp 2048 --tg 128 --depth 0 4096 8192 --concurrency 1 2 4 \
-    --runs 5 --warmup-runs 2 --latency-mode generation \
+    --runs 6 --warmup-runs 2 --latency-mode generation \
     --no-cache --exact-tg --format json --save-result benchmarks/raw/<...>/benchy.json
 
 * ``--runs N``     — N measured runs per (depth × pp × tg × concurrency) cell
@@ -17,7 +17,9 @@ Protocol per ``--repeat`` sweep (all inside one clean-window gate):
 * ``--exact-tg``   — pin output length (min_tokens + ignore_eos) so
                       EOS-early-stop can't skew the tg t/s variance
 * raw JSON per sweep → benchmarks/raw/<ts>/benchy-r<i>.json (git-trackable)
-* normalized rows   → benchmarks/history.jsonl (one line per sweep)
+* the vLLM server log (container start → bench end) →
+  benchmarks/raw/<ts>/vllm-server.log (kernel-dispatch debugging)
+* normalized rows   → benchmarks/history.jsonl (one line per run)
 """
 from __future__ import annotations
 
@@ -147,15 +149,16 @@ def _aggregate_gates(gates: list[dict | None]) -> dict | None:
     }
 
 
-def run_perf(s: Settings, layout, runs: int = 5, warmup_runs: int = 2,
-             exact_tg: bool = True, repeat: int = 3,
+def run_perf(s: Settings, layout, runs: int = 6, warmup_runs: int = 2,
+             exact_tg: bool = True, repeat: int = 1,
              depths: list[int] | None = None,
              concurrency: list[int] | None = None, pp: int = 2048,
              tg: int = 128, gate: bool = True, confirm: int = 3,
              gate_timeout_s: float = 3600, api_key: str | None = None,
              label: str | None = None) -> list[dict]:
-    """Run ``repeat`` gated perf sweeps; persist raw + history; return the
-    records."""
+    """Run ``repeat`` gated perf sweeps (default: one, 6 measured runs/cell);
+    persist raw + the vLLM server log + history; print llama-benchy's
+    terminal table; return the records."""
     depths = depths or [0, 4096, 8192]
     concurrency = concurrency or [1, 2, 4]
     benchy = find_benchy()
@@ -201,26 +204,29 @@ def run_perf(s: Settings, layout, runs: int = 5, warmup_runs: int = 2,
                 continue
             gate_summary = {"clean": True, "confirm": confirm,
                             "open_ts": open_ts}
-        sweep_start = time.time()
         rc = subprocess.call(cmd)
         if rc != 0:
             raise BenchError(f"llama-benchy exited {rc} — see raw output")
         if not out_json.exists():
             raise BenchError(f"llama-benchy produced no JSON at {out_json}")
 
-        log_path = out_dir / f"vllm-r{i + 1}.log"
-        if dockerctl.dump_server_log(sweep_start, log_path):
-            print(f"[mjolnir]   server log → {log_path}")
-        else:
-            print(f"[mjolnir]   (vLLM log not captured — container "
-                  f"'{dockerctl.CONTAINER_NAME}' not found/running)",
-                  file=sys.stderr)
-
         raw = json.loads(out_json.read_text())
         cells = hist.parse_benchy_json(raw)
         sweep_cells.append(cells)
         sweep_gates.append(gate_summary)
         print(f"[mjolnir] sweep {i + 1}/{repeat} done ({len(cells)} cells)")
+
+    # The vLLM server log for kernel debugging: the WHOLE container log
+    # (startup kernel dispatch + every request of the bench), not just the
+    # bench window — what the attention backend got picked as is only in
+    # the startup lines.
+    full_log = out_dir / "vllm-server.log"
+    if dockerctl.dump_server_log(None, full_log):
+        print(f"[mjolnir]   server log (container start → now) → {full_log}")
+    else:
+        print(f"[mjolnir]   (vLLM log not captured — container "
+              f"'{dockerctl.CONTAINER_NAME}' not found/running)",
+              file=sys.stderr)
 
     if not sweep_cells:
         return []
@@ -232,26 +238,145 @@ def run_perf(s: Settings, layout, runs: int = 5, warmup_runs: int = 2,
     rec["repeat"] = len(sweep_cells)
     hist.append_record(layout.history_file, rec)
     records.append(rec)
-    _print_summary(rec)
+    print_benchy_table(out_dir, rec)
     return records
 
 
-def _print_summary(rec: dict) -> None:
-    n = rec.get("repeat", 1) * rec["runs"]
-    print(f"\n{'=' * 66}\n  {rec['backend']} — tg t/s "
-          f"(pooled over {rec.get('repeat', 1)} sweep(s) × {rec['runs']} runs = "
-          f"{n} samples/cell)\n{'=' * 66}")
-    print(f"  {'context':>8} {'c=1':>9} {'c=2':>9} {'c=4':>9}")
-    rows: dict[int, dict] = {}
-    for c in rec["cells"]:
-        m = c.get("tg_tps")
-        if not m or m.get("mean") is None:
+# ── the llama-benchy terminal table (the one the tool renders natively) ─────
+#
+# Same layout as llama-benchy's own md table: one row per test (pp rows +
+# tg rows per context × concurrency), cells "mean ± std" over the pooled
+# per-run values. Rebuilt from the raw benchy-r*.json files so the terminal
+# shows the run's numbers next to the raw dump.
+
+# raw-JSON metric fields, in table order.
+_BENNY_METRICS = ("pp_throughput", "pp_req_throughput", "tg_throughput",
+                  "tg_req_throughput", "peak_throughput",
+                  "peak_req_throughput", "ttfr", "est_ppt", "e2e_ttft")
+
+# Table columns: (header, metric key). Full layout when >1 concurrency;
+# the req-split columns collapse when concurrency is single.
+_COLS_FULL = (("t/s (total)", "total"), ("t/s (req)", "req"),
+              ("peak t/s", "peak"), ("peak t/s (req)", "peak_req"),
+              ("ttfr (ms)", "ttfr"), ("est_ppt (ms)", "est_ppt"),
+              ("e2e_ttft (ms)", "e2e_ttft"))
+_COLS_C1 = (("t/s", "total"), ("peak t/s", "peak"),
+            ("ttfr (ms)", "ttfr"), ("est_ppt (ms)", "est_ppt"),
+            ("e2e_ttft (ms)", "e2e_ttft"))
+
+
+def _pool_benchy_files(out_dir: Path) -> tuple[str, int, list[dict]]:
+    """Pool the per-run values across every sweep's raw JSON. Returns
+    (model, max_concurrency, pooled entries) in producer order: context
+    depth outermost (ctx-phase rows first, then the standard run),
+    concurrency innermost."""
+    groups: dict[tuple, list[dict]] = {}
+    model = ""
+    max_c = 1
+    for f in sorted(out_dir.glob("benchy-r*.json")):
+        try:
+            raw = json.loads(f.read_text())
+        except (json.JSONDecodeError, OSError):
             continue
-        ctx = c.get("context")
-        rows.setdefault(ctx, {})[c.get("concurrency")] = m["mean"]
-    for ctx in sorted(rows):
-        row = rows[ctx]
-        print(f"  {ctx:>8} " + " ".join(
-            f"{row.get(cc, float('nan')):>9.1f}" for cc in (1, 2, 4)))
-    print(f"{'=' * 66}")
-    print(f"  history: {rec['raw']}  (+1 row to history.jsonl)")
+        model = raw.get("model", model)
+        for b in raw.get("benchmarks", []):
+            key = (b.get("context_size") or 0,
+                   not bool(b.get("is_context_prefill_phase")),
+                   b.get("concurrency") or 1)
+            groups.setdefault(key, []).append(b)
+            max_c = max(max_c, b.get("concurrency") or 1)
+    entries = []
+    for key in sorted(groups):
+        blist = groups[key]
+        first = blist[0]
+        base = {"concurrency": first.get("concurrency"),
+                "context_size": first.get("context_size") or 0,
+                "prompt_size": first.get("prompt_size"),
+                "response_size": first.get("response_size"),
+                "is_context_prefill_phase":
+                    bool(first.get("is_context_prefill_phase"))}
+        for name in _BENNY_METRICS:
+            vals: list[float] = []
+            for b in blist:
+                m = b.get(name)
+                if isinstance(m, dict) and m.get("values"):
+                    vals.extend(float(v) for v in m["values"])
+            if vals:
+                base[name] = {"mean": _mean(vals), "std": _std(vals)}
+        entries.append(base)
+    return model, max_c, entries
+
+
+def _entry_rows(model: str, max_c: int, e: dict) -> list[tuple[str, list]]:
+    """One pooled entry → its pp row + tg row (the ctx variants when it is a
+    prefix-caching prefill-phase run). Cells = metric dicts (or None)."""
+    ctx = e["context_size"] or 0
+    conc = e["concurrency"] or 1
+    d = f" @ d{ctx}" if ctx else ""
+    c = f" (c{conc})" if max_c > 1 else ""
+    if e["is_context_prefill_phase"]:
+        pp_lbl, tg_lbl = f"ctx_pp{d}{c}", f"ctx_tg{d}{c}"
+    else:
+        pp_lbl = f"pp{e['prompt_size']}{d}{c}"
+        tg_lbl = f"tg{e['response_size']}{d}{c}"
+    pp_vals = {"total": e.get("pp_throughput"),
+               "req": e.get("pp_req_throughput"),
+               "peak": None, "peak_req": None,
+               "ttfr": e.get("ttfr"), "est_ppt": e.get("est_ppt"),
+               "e2e_ttft": e.get("e2e_ttft")}
+    tg_vals = {"total": e.get("tg_throughput"),
+               "req": e.get("tg_req_throughput"),
+               "peak": e.get("peak_throughput"),
+               "peak_req": e.get("peak_req_throughput"),
+               "ttfr": None, "est_ppt": None, "e2e_ttft": None}
+    cols = _COLS_FULL if max_c > 1 else _COLS_C1
+    out = []
+    for lbl, vals in ((pp_lbl, pp_vals), (tg_lbl, tg_vals)):
+        cells = [vals[k] for _, k in cols]
+        if any(m is not None for m in cells):  # skip all-null rows
+            out.append((lbl, cells))
+    return out
+
+
+def _pipe_table(headers: list[str], rows: list[list[str]]) -> str:
+    """A GitHub-pipe table (llama-benchy's md format): first column
+    left-aligned, metric columns right-aligned."""
+    aligns = ["<"] + [">"] * (len(headers) - 1)
+    widths = [max([len(h)] + [len(r[i]) for r in rows])
+              for i, h in enumerate(headers)] if rows \
+        else [len(h) for h in headers]
+
+    def data_row(cells: list[str]) -> str:
+        return "| " + " | ".join(
+            c.rjust(w) if a == ">" else c.ljust(w)
+            for c, w, a in zip(cells, widths, aligns)) + " |"
+
+    def sep_cell(a: str, w: int) -> str:
+        return ":" + "-" * (w - 1) if a == "<" else "-" * (w - 1) + ":"
+    sep = "|" + "|".join(sep_cell(a, w) for w, a in zip(widths, aligns)) + "|"
+    return "\n".join([data_row(headers), sep,
+                      *map(data_row, rows)])
+
+
+def print_benchy_table(out_dir: Path, rec: dict) -> None:
+    """Print llama-benchy's terminal table for the run (pooled over its
+    sweeps), beside the raw JSON dump."""
+    model, max_c, entries = _pool_benchy_files(out_dir)
+    model = model or rec.get("model", "")
+    rows = [[model] + [lbl] +
+            [f"{m['mean']:.2f} ± {m['std']:.2f}" if m else ""
+             for m in cells]
+            for e in entries for lbl, cells in _entry_rows(model, max_c, e)]
+    cols = _COLS_FULL if max_c > 1 else _COLS_C1
+    headers = ["model", "test"] + [h for h, _ in cols]
+    n = rec.get("repeat", 1) * rec["runs"]
+    print(f"\n{'=' * 100}\n  llama-benchy — {rec.get('backend')} "
+          f"({rec.get('image')})\n  pooled over {rec.get('repeat', 1)} "
+          f"sweep(s) × {rec['runs']} runs = {n} samples/cell\n"
+          f"{'=' * 100}")
+    if rows:
+        print(_pipe_table(headers, rows))
+    else:
+        print("  (no results)")
+    print(f"{'=' * 100}")
+    print(f"  raw: {out_dir}  (+1 row to history.jsonl)")

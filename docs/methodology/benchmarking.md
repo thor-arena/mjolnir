@@ -118,12 +118,16 @@ Canonical kernel comparison shape (used by the GEMV workstream):
   data — see [research/tool-eval-bench-perf-runs.md](../research/tool-eval-bench-perf-runs.md)).
   The mjolnir wrapper is `src/mjolnir/benchy.py`; raw JSON lands in
   `benchmarks/raw/perf-<timestamp>/`.
-- **Protocol flags:** `--runs` = measured cells per prompt (default 5),
+- **Protocol flags:** `--runs` = measured runs per cell (default 6),
   `--exact-tg` (pin output tokens — kills EOS early-stop variance), `--no-cache`
   (no server-side prefix caching between measurements).
-- **Independent repeats:** a sweep is repeated R times (default 3), each repeat
-  inside its **own clean window**; per-cell values are reported as
-  mean ± std across repeats. A DIRTY repeat is dropped, not averaged in.
+- **Independent repeats:** `--repeat` re-runs the whole sweep R times
+  (default 1), each repeat inside its **own clean window**; per-cell values
+  are pooled across repeats and reported as mean ± std. A DIRTY repeat is
+  dropped, not averaged in.
+- **Server log:** the run saves the vLLM container's whole log
+  (`vllm-server.log` next to the raw JSONs) — startup kernel dispatch is in
+  there for debugging what the served image actually ran.
 - **A/B mode** (`mjolnir bench ab --backends …`) restarts the server per leg
   (different image/config). This is deliberately destructive and must be
   scheduled — it takes the live service down between legs.

@@ -237,19 +237,25 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
-def dump_server_log(since_epoch: float, out_path: Path) -> bool:
-    """Capture the vLLM container's logs since ``since_epoch`` (unix seconds)
-    to ``out_path``, with ANSI colors stripped. Best-effort: returns ``False``
-    (no raise) when the container is absent/not running or docker fails — a
-    log capture failure never fails the bench."""
+def dump_server_log(since_epoch: float | None, out_path: Path) -> bool:
+    """Capture the vLLM container's logs to ``out_path``, with ANSI colors
+    stripped. ``since_epoch`` (unix seconds) bounds the capture from that
+    instant; ``None`` captures the whole container log since it started
+    (startup kernel-dispatch lines + everything after — what ``bench perf``
+    saves for kernel debugging). Best-effort: returns ``False`` (no raise)
+    when the container is absent/not running or docker fails — a log
+    capture failure never fails the bench."""
     if not container_running():
         return False
-    ts = time.strftime("%Y-%m-%dT%H:%M:%S.000000000Z",
-                       time.gmtime(since_epoch))
+    args = [_docker(), "logs"]
+    if since_epoch is not None:
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S.000000000Z",
+                           time.gmtime(since_epoch))
+        args += ["--since", ts]
+    args += [CONTAINER_NAME]
     try:
         with out_path.open("w") as f:
-            subprocess.run([_docker(), "logs", "--since", ts, CONTAINER_NAME],
-                           stdout=f, stderr=f, check=False)
+            subprocess.run(args, stdout=f, stderr=f, check=False)
     except (OSError, DockerError):
         return False
     try:

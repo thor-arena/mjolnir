@@ -463,12 +463,14 @@ def gate(port: Optional[int] = typer.Option(None, "--port"),
 # ── bench ───────────────────────────────────────────────────────────────────
 
 @bench_app.command("perf")
-def bench_perf(runs: int = typer.Option(5, "--runs",
+def bench_perf(runs: int = typer.Option(6, "--runs",
                                         help="measured runs per cell "
                                              "(llama-benchy --runs)"),
-                warmup_runs: int = typer.Option(2, "--warmup-runs"),
-                repeat: int = typer.Option(3, "--repeat",
-                                           help="independent gated sweeps"),
+               warmup_runs: int = typer.Option(2, "--warmup-runs"),
+               repeat: int = typer.Option(1, "--repeat",
+                                          help="independent gated sweeps "
+                                               "(default: one sweep, 6 runs "
+                                               "per cell)"),
                 depths: str = typer.Option("0,4096,8192", "--depths"),
                 concurrency: str = typer.Option("1,2,4", "--concurrency"),
                 pp: int = typer.Option(2048, "--pp"),
@@ -573,8 +575,8 @@ def bench_ab(backends: str = typer.Option(f"{DEFAULT_QUANT},{BASELINE_QUANT}",
                                                "'<model>/<config>' or "
                                                "'<image>:<model>/<config>' — "
                                                "available: mjolnir model list"),
-             runs: int = typer.Option(5, "--runs"),
-             repeat: int = typer.Option(2, "--repeat"),
+              runs: int = typer.Option(6, "--runs"),
+              repeat: int = typer.Option(1, "--repeat"),
              gate: bool = typer.Option(True, "--gate/--no-gate"),
              model: Optional[str] = typer.Option(None, "--model"),
              image: Optional[str] = typer.Option(None, "--image",
@@ -685,12 +687,13 @@ def verify(image: Optional[str] = typer.Option(None, "--image"),
 # ── plot / history ──────────────────────────────────────────────────────────
 
 @app.command()
-def plot(concurrency: int = typer.Option(1, "--concurrency"),
-         context: int = typer.Option(8192, "--context")):
-    """Render the README charts (kernel.png, fa4-vs-fi.png, history.png)."""
+def plot():
+    """Render the README charts (kernel-microbench.png,
+    vllm-vs-mjolnir-image.png, bench-compare.png, tg-variability.png,
+    ttfr-by-context.png)."""
     layout = load_layout()
     try:
-        plots.render_all(layout, concurrency, context)
+        plots.render_all(layout)
     except RuntimeError as e:
         typer.secho(str(e), fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
