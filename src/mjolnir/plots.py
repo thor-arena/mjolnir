@@ -221,7 +221,7 @@ def render_kernel_charts(layout: RepoLayout) -> list[Path]:
         ax.set_xlabel("SplitKV plan — CTAs = 4 × ns (ns=1 → 4, ns=64 → 256)")
         ax.set_ylabel("wall µs (median of 300, CUDA events)")
         theme.style_title(
-            ax, "GEMV decode — split-KV sweep\none clean window",
+            ax, "GEMV decode — split-KV sweep",
             "L=8192 · M=1 · GQA 24/4 · FP8 KV · nvfp4 weights · sm_110a")
         if gemv_line is not None:
             theme.legend(ax, [gemv_line], ["FA4-GEMV (st16)"], ncols=1)
@@ -274,7 +274,7 @@ def render_kernel_charts(layout: RepoLayout) -> list[Path]:
         ax.set_ylabel("wall µs (median of 100)")
         theme.style_title(
             ax, "FA4 vs FlashInfer —\ndecode kernel",
-            "M=1 · GQA 24/4 · block-128 paged · one clean window")
+            "M=1 · GQA 24/4 · block-128 paged")
         # Red HW limit: the per-layer KV floor at each L (DRAM BW).
         Ls = sorted({L for v in by_backend.values() for L in v})
         if Ls:
@@ -391,7 +391,7 @@ def render_kernel_length(layout: RepoLayout) -> list[Path]:
         theme.legend(ax, [h for h, _ in items], [lb for _, lb in items], ncols=2)
 
     _footer(fig, "mjolnir · gemv-decode-bench (dense/paged/FA4-1CTA/FlashInfer) · "
-                 "wall-clock, one clean window each")
+                 "wall-clock")
     theme.watermark(fig)
     return [_save(fig, layout.charts_dir / "kernel-length.png")]
 
