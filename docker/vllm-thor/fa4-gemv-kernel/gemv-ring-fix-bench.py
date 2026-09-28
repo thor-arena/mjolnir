@@ -17,7 +17,13 @@ All wall-clock legs run in one process, one gated window. Protocol:
     (CONFIRM=6, stricter than the original 3) and the run is DIRTY (exit 2)
     if ANY sample inside the window is not (0,0);
   * re-verify: server_load() must be (0,0) again IMMEDIATELY before each
-    timed burst; a non-zero sample aborts the run (exit 4) without writing.
+    timed burst; a reachable non-zero sample aborts the run (exit 4) without
+    writing (a None — endpoint down — means the server is offline, not busy,
+    and does NOT abort);
+  * if the endpoint is unreachable for OFFLINE_CONFIRM consecutive samples
+    the co-located server is offline (nothing sharing the GPU) and the bench
+    runs UNGATED instead of waiting/failing (the JSON marks it
+    ``"gated": false``).
   * 20 warmup + 300 pooled CUDA-event timed iters per leg (median/p95/min/mean).
 
 Leg ordering constraint: the interface's GEMV compile cache does NOT key on
@@ -28,8 +34,9 @@ in the cache. The ns env knob is set per timed call (global process state).
 
 JIT compiles (both stages variants) happen during prep, outside the window.
 
-Exit codes: 0 = clean + written; 2 = dirty window; 3 = idle-wait timeout;
-            4 = non-zero load at a pre-burst re-check (abort).
+Exit codes: 0 = clean + written (gated or ungated); 2 = dirty window;
+            3 = idle-wait timeout; 4 = reachable non-zero load at a
+            pre-burst re-check (abort).
 
 Run (driver):
   docker run --rm --gpus all --network host --entrypoint python3 \
@@ -37,6 +44,10 @@ Run (driver):
     -v "$TASK":/p -e TMPDIR=/tmp/ringfix \
     mjolnir/vllm-thor:qwen38-sm110-v11 \
     /p/gemv-ring-fix-bench.py --out /p/gemv-ring-fix-bench.json
+
+Under ``mjolnir bench kernel gemv-ringfix`` the host's benchmarks/raw is
+mounted at /raw and the default --out is /raw/gemv-ring-fix-bench.json
+(a bare run updates the committed raw the charts read).
 """
 from __future__ import annotations
 
@@ -84,6 +95,7 @@ METRICS_URL = os.environ.get("MJOLNIR_METRICS_URL",
 POLL_S = 2.0
 CONFIRM = 6  # stricter than the original 3
 WAIT_TIMEOUT_S = 3600
+OFFLINE_CONFIRM = 3  # consecutive unreachable samples => server offline
 
 
 def server_load() -> tuple[float, float] | None:
@@ -118,18 +130,30 @@ class Monitor(threading.Thread):
         self._stop.set()
 
 
-def wait_for_idle(mon: Monitor) -> float | None:
+def wait_for_idle(mon: Monitor) -> float | str | None:
+    """Window-start ts; ``"offline"`` if the endpoint stays unreachable (the
+    co-located server is down -> nothing to gate against); ``None`` on timeout."""
     t_start = time.perf_counter()
     consumed = 0
     streak = 0
+    offline_streak = 0
     while time.perf_counter() - t_start < WAIT_TIMEOUT_S:
         while consumed < len(mon.trace):
             _ts, load = mon.trace[consumed]
             consumed += 1
-            if load == (0.0, 0.0):
-                streak += 1
-            else:
+            if load is None:
+                # Unreachable is not busy, but not clean either — only feed
+                # the offline fast path (a drop after being up may hide load).
                 streak = 0
+                offline_streak += 1
+            else:
+                offline_streak = 0
+                if load == (0.0, 0.0):
+                    streak += 1
+                else:
+                    streak = 0
+        if offline_streak >= OFFLINE_CONFIRM:
+            return "offline"
         if streak >= CONFIRM:
             return mon.trace[consumed - 1][0]
         time.sleep(1.0)
@@ -271,9 +295,16 @@ def summarize(times: list[float]) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="/p/gemv-ring-fix-bench.json")
+    ap.add_argument("--out", default=None)
     ap.add_argument("--no-gate", action="store_true")
     args = ap.parse_args()
+    if args.out is None:
+        # Default: the host's benchmarks/raw (the /raw mount under
+        # ``mjolnir bench kernel``) so a bare run updates the committed raw
+        # the charts read; /p (the kernel package dir) fallback when run
+        # without that mount.
+        base = "/raw" if os.path.isdir("/raw") else "/p"
+        args.out = f"{base}/gemv-ring-fix-bench.json"
 
     import vllm.vllm_flash_attn.cute.interface as iface
 
@@ -333,16 +364,24 @@ def main() -> int:
     load0 = server_load()
     print(f"[prep] done; server load now: {load0}", flush=True)
 
+    offline = False
     if args.no_gate:
         window_start = time.time()
         print("SMOKE MODE (--no-gate): window not gated")
     else:
-        window_start = wait_for_idle(mon)
-        if window_start is None:
+        window = wait_for_idle(mon)
+        if window is None:
             print(f"TIMEOUT waiting for {CONFIRM}x consecutive 0/0 after {WAIT_TIMEOUT_S}s")
             mon.stop()
             return 3
-        print(f"CLEAN WINDOW OPEN ({CONFIRM} consecutive 0/0 samples)", flush=True)
+        if window == "offline":
+            window_start = time.time()
+            offline = True
+            print(f"vLLM metrics unreachable ({METRICS_URL}) — server offline; "
+                  f"running UNGATED (nothing co-located to gate against)", flush=True)
+        else:
+            window_start = window
+            print(f"CLEAN WINDOW OPEN ({CONFIRM} consecutive 0/0 samples)", flush=True)
 
     results: dict[str, dict] = {}
     swapped_to_b = False
@@ -356,8 +395,10 @@ def main() -> int:
                 swapped_to_b = True
                 print("SWAP: stages=2 objects installed in the GEMV cache", flush=True)
             if not args.no_gate:
+                # Only a reachable non-0/0 load aborts; a None (endpoint down)
+                # means the co-located server is offline, not busy.
                 load = server_load()
-                if load != (0.0, 0.0):
+                if load is not None and load != (0.0, 0.0):
                     print(f"ABORT: pre-burst re-check for {tag} saw load={load}", flush=True)
                     mon.stop()
                     return 4
@@ -379,13 +420,25 @@ def main() -> int:
     load_end = server_load()
     mon.stop()
     in_window = [(ts, load) for ts, load in mon.trace if window_start <= ts <= window_end]
-    dirty = [s for s in in_window if s[1] is None or s[1] != (0.0, 0.0)]
+    # Unreachable samples count as contamination only if the server WAS
+    # reachable earlier in this run (a drop after being up may hide load);
+    # if it is offline the whole time, "unreachable" == "nothing on the GPU".
+    saw_reachable = any(load is not None for _, load in mon.trace)
+    dirty: list = []
+    for s in in_window:
+        load = s[1]
+        if load is None:
+            if saw_reachable:
+                dirty.append(s)
+        elif load != (0.0, 0.0):
+            dirty.append(s)
     clean = not dirty
 
     report = {
         "env": env,
         "window": {
             "start": window_start, "end": window_end,
+            "gated": not args.no_gate and not offline,
             "clean": clean, "num_samples": len(in_window),
             "dirty_samples": [list(d) for d in dirty],
             "server_load_before_wait": load0, "server_load_at_end": load_end,
@@ -396,7 +449,10 @@ def main() -> int:
         json.dump(report, f, indent=2)
     print(f"wrote {args.out}")
     print(f"window clean: {clean} (samples={len(in_window)}, dirty={len(dirty)})")
-    print(f"VERDICT: {'CLEAN' if clean else 'DIRTY'}")
+    verdict = "CLEAN" if clean else "DIRTY"
+    if args.no_gate or offline:
+        verdict += " (ungated: " + ("--no-gate" if args.no_gate else "vLLM offline") + ")"
+    print(f"VERDICT: {verdict}")
     return 0 if clean else 2
 
 

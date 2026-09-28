@@ -125,6 +125,18 @@ docker run --rm --gpus all --network host --entrypoint python3 \
   run is aborted (DIRTY) if any in-window sample is non-zero, with an
   additional 0/0 re-check immediately before each timed burst. The vLLM
   server is **never** stopped or restarted.
+  **Server-offline fast path**: if the endpoint is unreachable for
+  OFFLINE_CONFIRM (3) consecutive samples, the co-located server is offline
+  and nothing shares the GPU — the bench then runs **ungated** instead of
+  waiting or failing, and marks the window `"gated": false` in the JSON (so
+  ungated numbers stay distinguishable from gated ones). Unreachable samples
+  count as dirty only if the server was reachable earlier in the same run.
+- **Raw output**: under `mjolnir bench kernel`, the host's `benchmarks/raw/`
+  is mounted at `/raw` and the default `--out` lands there — a bare run
+  updates `benchmarks/raw/gemv-decode-bench-<mode>.json` /
+  `benchmarks/raw/gemv-ring-fix-bench.json` (the committed raws the charts
+  read). `--out /p/<name>` (the kernel package dir) or `--out /raw/<name>`
+  override.
 - **ncu achieved-BW over wall-clock under desktop co-tenancy**: the desktop
   Xorg session's GPU load cannot be gated (no request-level metric). Kernel
   counters (`lts__t_sectors.sum × 32 B / gpu__time_duration.sum` — L2-fabric

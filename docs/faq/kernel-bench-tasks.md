@@ -12,7 +12,7 @@ mjolnir bench kernel dummy --help-list
 | kind | means |
 |---|---|
 | `test` | fresh container against the image, **no server** (GPU ones self-skip on a box without CUDA) |
-| `bench` | **needs the vLLM server running** — the clean-window gate; the GEMV'd vfa tree is mounted, the workdir at `/p`, host networking |
+| `bench` | **gates on the vLLM server** (server offline → the run proceeds ungated); the GEMV'd vfa tree is mounted, the workdir at `/p`, `benchmarks/raw` at `/raw`, host networking |
 | `host` | the gate itself |
 
 Tasks (as of the v13 stack):
@@ -48,22 +48,28 @@ mjolnir bench kernel gemv-bench --mode all
 
 ## Getting raw numbers (the grep-able contract)
 
-Bench tasks write raw JSON with `--out` (the task's own flags pass through
-verbatim; launcher flags like `--image/--dry-run` can appear anywhere):
+A **bare run** (no `--out`) auto-writes the GEMV benches into
+`benchmarks/raw/` — `gemv-bench` → `gemv-decode-bench-<mode>.json`,
+`gemv-ringfix` → `gemv-ring-fix-bench.json` — so the committed raws the
+charts read stay current. `--out` overrides (the task's own flags pass
+through verbatim; launcher flags like `--image/--dry-run` can appear
+anywhere):
 
 ```bash
-mjolnir bench kernel gemv-ringfix --out /p/gemv.json
-grep -E '"(median|p95|bw_gbs_nominal_kv|clean)"' docker/vllm-thor/fa4-gemv-kernel/gemv.json
+mjolnir bench kernel gemv-ringfix
+grep -E '"(median|p95|bw_gbs_nominal_kv|clean)"' benchmarks/raw/gemv-ring-fix-bench.json
 ```
 
 - `--out` is a **container** path: the workdir `docker/vllm-thor/fa4-gemv-kernel/`
-  is mounted at `/p`, so the file lands back in that directory on the host.
+  is mounted at `/p` and `benchmarks/raw/` at `/raw`, so the file lands back
+  in the matching host directory.
 - Preview any launch without touching the GPU: `--dry-run` (prints the
   `docker run` argv).
 - Point a bench at your iteration tree: `--vfa-tree vfa-tree/vllm_flash_attn`.
 - Preflight is automatic for `bench` tasks: if the metrics endpoint is down
-  you get a fast failure + a pointer to `mjolnir serve up` — the launcher
-  never restarts the server.
+  the launcher notes it and the bench runs **ungated** (server offline →
+  nothing co-located to gate against, marked `"gated": false` in the JSON) —
+  the launcher never fails for an offline server and never restarts it.
 
 Methodology for what a kernel number means (gate, ncu vs wall, same-window
 ratios): [gemv-kernel-improvement.md](gemv-kernel-improvement.md) and

@@ -30,7 +30,7 @@
 It is a ready-to-run vLLM image and a single CLI for serving LLM models on the NVIDIA Jetson AGX Thor (`sm_110a`). One command starts an OpenAI-compatible server, another benchmarks it, another verifies the custom kernel against a reference implementation. The defaults are baked in for `Qwen/Qwen3.8-27B`, so the first command already does the right
 thing.
 
-**Why it exists.** Upstream vLLM has no working FA4 path on `sm_110`. For the head_dim=256 attention layers of models like `Qwen/Qwen3.8-27B`, it falls back to Flash Attention 2. FA2 doesn't support an 8-bit KV cache, so those layers get forced to bf16 KV. That doubles the memory traffic on a device where memory bandwidth is the bottleneck. Every generated token re-reads the whole KV cache, and on a 273 GB/s edge #GPU, that read sets your tokens per second. Measured on Jetson Thor:
+**Why it exists.** Upstream vLLM has no working FA4 path on `sm_110`. For the head_dim=256 attention layers of models like `Qwen/Qwen3.8-27B`, it falls back to Flash Attention 2. FA2 doesn't support an 8-bit KV cache, so those layers get forced to bf16 KV. That doubles the memory traffic on a device where memory bandwidth is the bottleneck. Every generated token re-reads the whole KV cache, and on a 273 GB/s edge GPU, that read sets your tokens per second. Measured on Jetson Thor:
 
 <p align="center">
   <img src="assets/opening-infographic.png" alt="Mjolnir vs stock vLLM — e2e decode and prefill" width="100%">
@@ -40,7 +40,7 @@ thing.
 |---|---|---|---|
 | token generation (e2e, c=1, 8K ctx) | 24.4 t/s | 25.4 t/s $\color{#16a34a}{\text{+4.0\\%}}$ | 25.0 t/s $\color{#16a34a}{\text{+2.2\\%}}$ |
 | prompt processing (e2e, c=1, 8K ctx) | 2 468 t/s | 2 938 t/s $\color{#16a34a}{\text{+19\\%}}$ | 3 557 t/s $\color{#16a34a}{\text{+44\\%}}$ |
-| decode kernel (L=8192) | 190.6 µs | 190.6 µs $\color{grey}{\text{0\\%}}$ | 223.4 µs $\color{red}{\text{+17\\%}}$<br />209.8 µs 1-CTA carve-out |
+| decode kernel (L=8192) | 189.4 µs | 189.4 µs $\color{grey}{\text{0\\%}}$ | 222.5 µs $\color{red}{\text{+17\\%}}$<br />211.1 µs 1-CTA carve-out |
 | model memory (KV cache) | 8-bit | 8-bit | 8-bit |
 
 ## Quickstart
@@ -145,15 +145,15 @@ M=1 decode, GQA 24:4, quantized KV + descales
 
 | decode path | µs (median) | nominal KV BW (GB/s) | Δ vs FlashInfer |
 |---|---:|---:|---:|
-| FlashInfer FA2-tc, e4m3 KV — production baseline | 190.58 | 88.03 | $\color{grey}{\text{0\\%}}$ |
-| FA4 GEMV, stages=16, ns=1 | 1 304.91 | 12.86 | $\color{red}{\text{+584.7\\%}}$ |
-| FA4 GEMV, stages=16, ns=4 | 367.74 | 45.62 | $\color{red}{\text{+93.0\\%}}$ |
-| FA4 GEMV, stages=16, ns=8 | 315.30 | 53.21 | $\color{red}{\text{+65.4\\%}}$ |
-| FA4 GEMV, stages=16, ns=20 | 223.42 | 75.09 | $\color{red}{\text{+17.2\\%}}$ |
-| FA4 GEMV, stages=16, ns=64 | 235.79 | 71.15 | $\color{red}{\text{+23.7\\%}}$ |
-| FA4 GEMV, stages=16, auto | 226.88 | 73.95 | $\color{red}{\text{+19.0\\%}}$ |
-| FA4 GEMV, stages=2, ns=1 | 1 275.65 | 13.15 | $\color{red}{\text{+569.4\\%}}$ |
-| FA4 GEMV, stages=2, ns=20 | 222.46 | 75.42 | $\color{red}{\text{+16.7\\%}}$ |
+| FlashInfer FA2-tc, e4m3 KV — production baseline | 189.44 | 88.56 | $\color{grey}{\text{0\\%}}$ |
+| FA4 GEMV, stages=16, ns=1 | 1 306.43 | 12.84 | $\color{red}{\text{+589.6\\%}}$ |
+| FA4 GEMV, stages=16, ns=4 | 366.50 | 45.78 | $\color{red}{\text{+93.5\\%}}$ |
+| FA4 GEMV, stages=16, ns=8 | 314.46 | 53.35 | $\color{red}{\text{+66.0\\%}}$ |
+| FA4 GEMV, stages=16, ns=20 | 222.46 | 75.42 | $\color{red}{\text{+17.4\\%}}$ |
+| FA4 GEMV, stages=16, ns=64 | 234.08 | 71.67 | $\color{red}{\text{+23.6\\%}}$ |
+| FA4 GEMV, stages=16, auto | 225.12 | 74.53 | $\color{red}{\text{+18.8\\%}}$ |
+| FA4 GEMV, stages=2, ns=1 | 1 275.17 | 13.16 | $\color{red}{\text{+573.1\\%}}$ |
+| FA4 GEMV, stages=2, ns=20 | 221.39 | 75.78 | $\color{red}{\text{+16.9\\%}}$ |
 
 **Multi-L session**
 
@@ -161,10 +161,10 @@ M=1 decode, GQA 24:4, quantized KV + descales
 
 | kernel | L=2048 | L=4096 | L=8192 |
 |---|---:|---:|---:|
-| FlashInfer | 229.50 | 237.09 | 258.91 |
-| FA4 hd256 1-CTA (carve-out) | 103.82 | 139.17 | 209.82 |
-| FA4 GEMV paged (auto) | 108.10 | 140.51 | 224.48 |
-| FA4 GEMV dense (auto) | 108.00 | 139.81 | 224.10 |
+| FlashInfer | 229.66 | 239.20 | 258.98 |
+| FA4 hd256 1-CTA (carve-out) | 106.11 | 139.42 | 211.07 |
+| FA4 GEMV paged (auto) | 107.73 | 139.42 | 222.19 |
+| FA4 GEMV dense (auto) | 107.23 | 139.07 | 222.74 |
 
 > **Note** <br />
 > 300 iters, same session; rows are separate windows, so cross-kernel ratios are directional only
@@ -206,16 +206,16 @@ M=1 decode, GQA 24:4, quantized KV + descales
 **Why the stock path is slow.** Upstream has no fast `hd256` decode path for `sm_110`: vLLM's native FlashAttention route ends in a 2-CTA-cluster kernel — the slow path for this shape — and vLLM downgrades `hd256` layers with quantized KV to `FA2` with a `bf16` KV cache (2× the memory traffic). Mjolnir ships a GEMV decode kernel for exactly this shape — pure FMA, dense or paged KV, `fp16`/`bf16`/`e4m3` KV with descales, SplitKV auto-planned for the 20-SM device — default-on in the image, plus the 14-patch vLLM/FlashInfer overlay that makes the rest of the stack work on Thor (spec-decode cudagraphs, GDN prefill enablement, FP8-KV policy gates).
 
 - **Parallelism (SplitKV / ns)**<br> 
-  The GEMV kernel splits the KV range over `ns` CTAs (LSE partials + exact merge). Same gated window, L=8192 M=1: ns=1 → 12.86 GB/s nominal, 1 304.9 µs; ns=20 → 75.09 GB/s, 223.4 µs (**×5.8**); ns=64 → 71.15 GB/s but wall-clock turns down (235.8 µs) — merge/recompute overhead eats the tail. The auto-plan lands ≈ ns=20 in the same window (226.9 µs).
+  The GEMV kernel splits the KV range over `ns` CTAs (LSE partials + exact merge). Same gated window, L=8192 M=1: ns=1 → 12.84 GB/s nominal, 1 306.4 µs; ns=20 → 75.42 GB/s, 222.5 µs (**×5.9**); ns=64 → 71.67 GB/s but wall-clock turns down (234.1 µs) — merge/recompute overhead eats the tail. The auto-plan lands ≈ ns=20 in the same window (225.1 µs).
 
 - **CTA width (1-CTA vs 2-CTA)**<br> 
-  The dedicated hd256 FA4 kernel runs a 2-CTA cluster; for decode shapes (M≤8) the second CTA halves the per-token KV scan rate. Dropping to 1 CTA (the carve-out) makes it the fastest decode kernel in the latest multi-L session (209.8 µs at L=8192, its own clean window).
+  The dedicated hd256 FA4 kernel runs a 2-CTA cluster; for decode shapes (M≤8) the second CTA halves the per-token KV scan rate. Dropping to 1 CTA (the carve-out) makes it the fastest decode kernel in the latest multi-L session (211.1 µs at L=8192, its own clean window).
 
 - **Ring depth (stages)**<br>
-  KV loads pipeline through a cp.async ring: stages=2 vs 16 at ns=20, same window — 222.5 µs (75.42 GB/s) vs 223.4 µs (75.09 GB/s): a wash at L=8192 while the KV still fits the 32 MiB L2. That is why stages=16 ships as default anyway: it is the right direction once KV stops fitting L2 (L=32K/64K validation is open work).
+  KV loads pipeline through a cp.async ring: stages=2 vs 16 at ns=20, same window — 221.4 µs (75.78 GB/s) vs 222.5 µs (75.42 GB/s): a wash at L=8192 while the KV still fits the 32 MiB L2. That is why stages=16 ships as default anyway: it is the right direction once KV stops fitting L2 (L=32K/64K validation is open work).
 
 - **Why GEMV at all**<br>
-  At M=1 the GEMV (vector-load + FMA) class is what the incumbent baseline (FlashInfer) uses; the tensor-core path adds pipeline cost it can't spend. The kernel matches that class and wins back the gap on the memory side — hence "within ~17%" in-window (223.4 vs 190.6 µs), with the remaining gap attributed to FI's wider tile shape (192 KB 384-row K+V tiles, 40 CTAs) — a tile-shape redesign, not a tuning knob.
+  At M=1 the GEMV (vector-load + FMA) class is what the incumbent baseline (FlashInfer) uses; the tensor-core path adds pipeline cost it can't spend. The kernel matches that class and wins back the gap on the memory side — hence "within ~17%" in-window (222.5 vs 189.4 µs), with the remaining gap attributed to FI's wider tile shape (192 KB 384-row K+V tiles, 40 CTAs) — a tile-shape redesign, not a tuning knob.
 
 > [!NOTE] 
 > **Measurement discipline** (normative for every number in the repo): the GPU is shared with the live server and the desktop, so nothing is ever killed to "clean" the GPU; benches run only inside **clean windows** (the live server's queue reads 0/0 for N consecutive samples) and discard dirty runs. Wall-clock is same-window ratios only; absolute kernel claims use **NCU achieved bandwidth** — and on CC 11.0 `dram__bytes.sum` is unavailable, so achieved BW is measured at the L2-fabric level (`lts__t_sectors × 32 B / time`). Full rules: [`docs/methodology/benchmarking.md`](docs/methodology/benchmarking.md).

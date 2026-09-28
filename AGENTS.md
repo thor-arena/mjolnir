@@ -141,23 +141,31 @@ or run it as a CLI; do not copy its logic into a new bench.
 `mjolnir bench kernel --help-list` shows every task. Examples:
 - `mjolnir image gates` — the sm_110 gate-probe canary (fresh container, no server).
 - `mjolnir bench kernel functional` — the no-GPU functional check.
-- `mjolnir bench kernel gemv-ringfix --out /p/r.json` — a gated GEMV bench (server must be up).
+- `mjolnir bench kernel gemv-ringfix` — a gated GEMV bench (server up = gated
+  window; offline = ungated run).
 - `mjolnir bench kernel gemv-bench --dry-run` — preview the docker command (no container).
 
 **Arg model:** launcher flags (`--image`, `--vfa-tree`, `--dry-run`, ...) are
 parsed wherever they appear; the **task's own** flags (`--out`, `--mode`,
 `--no-gate`, ...) pass through to the script verbatim.
 
-**Getting raw numbers for grep:** pass `--out <path>` — the bench writes the
-raw JSON there; then grep it:
+**Getting raw numbers for grep:** a bare run (no `--out`) auto-writes the
+GEMV benches into `benchmarks/raw/` — the host dir is mounted at `/raw`
+(`gemv-bench` → `gemv-decode-bench-<mode>.json`, `gemv-ringfix` →
+`gemv-ring-fix-bench.json`) — so the committed raws the charts read stay
+current. `--out <path>` overrides (container path: `/p` = the kernel package
+dir, `/raw` = `benchmarks/raw/`); then grep it:
 ```
-mjolnir bench kernel gemv-ringfix --out /p/gemv.json
-grep -E '"(median|p95|bw_gbs_nominal_kv|clean)"' /p/gemv.json
+mjolnir bench kernel gemv-ringfix
+grep -E '"(median|p95|bw_gbs_nominal_kv|clean)"' benchmarks/raw/gemv-ring-fix-bench.json
 ```
 
-**BENCH tasks need the vLLM server running** (the gate polls it). Start it
-with `mjolnir serve up` first; the launcher preflights the metrics endpoint
-and fails fast with a pointer if it's down. It **never** restarts the server.
+**BENCH tasks gate on the vLLM server** (the gate polls it). Start it with
+`mjolnir serve up` first; if the metrics endpoint is down the launcher notes
+it and the bench runs **ungated** (server offline → nothing co-located to
+gate against — the raw JSON marks the window `"gated": false`, so ungated
+numbers are distinguishable from gated ones). It never fails for an offline
+server and **never** restarts the server.
 
 **End-to-end perf:** `mjolnir bench perf` — gated llama-benchy
 (`--runs 6` measured/cell, one gated sweep by default — `--repeat` adds

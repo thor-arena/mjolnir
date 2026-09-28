@@ -23,7 +23,7 @@ from pathlib import Path
 
 from mjolnir.config import Settings, VFA_DIST_PATH, find_repo_root
 from mjolnir.dockerctl import _docker, _run_quiet
-from mjolnir.gate import PreflightError, server_load
+from mjolnir.gate import server_load
 
 
 @dataclass(frozen=True)
@@ -98,16 +98,14 @@ GEMV_DIR_RELPATH = Path("docker/vllm-thor/fa4-gemv-kernel")
 
 
 def preflight_bench(task: Task, s: Settings) -> int:
-    """For BENCH tasks, confirm the vLLM metrics endpoint is reachable."""
+    """For BENCH tasks, probe the vLLM metrics endpoint (informational only —
+    an offline server is fine: the bench then just runs ungated)."""
     load = server_load(s.metrics_url)
     if load is None:
-        print(
-            f"[mjolnir] ERROR: {task.name} is a gated BENCH and the vLLM "
-            f"metrics endpoint ({s.metrics_url}) is unreachable.\n"
-            f"[mjolnir]        Start the server first: mjolnir serve up\n"
-            f"[mjolnir]        The bench then waits for the idle GPU on its "
-            f"own — it never restarts the server.", file=sys.stderr)
-        return 2
+        print(f"[mjolnir] vLLM metrics {s.metrics_url} unreachable — server "
+              f"offline; {task.name} will run UNGATED (nothing co-located to "
+              f"gate against).", file=sys.stderr)
+        return 0
     print(f"[mjolnir] vLLM up (running={load[0]:g} waiting={load[1]:g}); "
           f"the bench will wait for a clean window.", file=sys.stderr)
     return 0
@@ -126,6 +124,12 @@ def build_docker(task: Task, s: Settings, vfa_tree: Path, workdir: Path,
         cmd += ["--network", "host", "--entrypoint", "python3"]
         cmd += ["-v", f"{vfa_tree}:{VFA_DIST_PATH}"]
         cmd += ["-v", f"{workdir}:/p"]
+        # The committed raw JSONs (the charts' input) are mounted at /raw so
+        # a bare run (no --out) updates benchmarks/raw in place, and
+        # ``--out /raw/<name>`` can target any raw filename.
+        raw_dir = find_repo_root() / "benchmarks" / "raw"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        cmd += ["-v", f"{raw_dir}:/raw"]
         cmd += ["-e", f"MJOLNIR_METRICS_URL={s.metrics_url}"]
         if task.tmpdir:
             cmd += ["-e", f"TMPDIR={task.tmpdir}"]

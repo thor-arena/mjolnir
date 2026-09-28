@@ -25,15 +25,23 @@ vllm:num_requests_running/waiting from the co-located server
 (http://127.0.0.1:6001/metrics, --network host) every 2 s; the window opens
 after 3 consecutive (0,0) samples and the run is DIRTY (exit 2) if any sample
 inside the window is not (0,0). Exit 3 = idle-wait timeout (driver retries).
+If the endpoint is unreachable for OFFLINE_CONFIRM consecutive samples the
+co-located server is offline (nothing sharing the GPU) and the bench runs
+UNGATED instead of waiting/failing (the JSON marks it ``"gated": false``).
 JIT compiles happen during prep (outside the clean window).
 
-Exit codes: 0 = clean + written; 2 = dirty window; 3 = idle-wait timeout.
+Exit codes: 0 = clean + written (gated or ungated); 2 = dirty window;
+            3 = idle-wait timeout.
 
 Run (driver, one docker per mode):
   docker run --rm --gpus all --network host --entrypoint python3 \
     -v $VFA_TREE:/usr/local/lib/python3.12/dist-packages/vllm/vllm_flash_attn \
     -v "$TASK":/p -e TMPDIR=/tmp/gemv-b1-<mode> \
     mjolnir/vllm-thor:qwen38-sm110-v11 /p/gemv-decode-bench.py --mode <mode> --out /p/gemv-decode-bench-<mode>.json
+
+Under ``mjolnir bench kernel gemv-bench`` the host's benchmarks/raw is
+mounted at /raw and the default --out is /raw/gemv-decode-bench-<mode>.json
+(a bare run updates the committed raw the charts read).
 """
 from __future__ import annotations
 
@@ -69,6 +77,7 @@ METRICS_URL = os.environ.get("MJOLNIR_METRICS_URL",
 POLL_S = 2.0
 CONFIRM = 3
 WAIT_TIMEOUT_S = 1800
+OFFLINE_CONFIRM = 3  # consecutive unreachable samples => server offline
 
 # FA4 1CTA ctor forcing: None = record only (natural path); True/False = force.
 _ctor_log: list[bool] = []
@@ -107,18 +116,30 @@ class Monitor(threading.Thread):
         self._stop.set()
 
 
-def wait_for_idle(mon: Monitor) -> float | None:
+def wait_for_idle(mon: Monitor) -> float | str | None:
+    """Window-start ts; ``"offline"`` if the endpoint stays unreachable (the
+    co-located server is down -> nothing to gate against); ``None`` on timeout."""
     t_start = time.perf_counter()
     consumed = 0
     streak = 0
+    offline_streak = 0
     while time.perf_counter() - t_start < WAIT_TIMEOUT_S:
         while consumed < len(mon.trace):
             _ts, load = mon.trace[consumed]
             consumed += 1
-            if load == (0.0, 0.0):
-                streak += 1
-            else:
+            if load is None:
+                # Unreachable is not busy, but not clean either — only feed
+                # the offline fast path (a drop after being up may hide load).
                 streak = 0
+                offline_streak += 1
+            else:
+                offline_streak = 0
+                if load == (0.0, 0.0):
+                    streak += 1
+                else:
+                    streak = 0
+        if offline_streak >= OFFLINE_CONFIRM:
+            return "offline"
         if streak >= CONFIRM:
             return mon.trace[consumed - 1][0]
         time.sleep(1.0)
@@ -290,7 +311,11 @@ def main() -> int:
     ap.add_argument("--no-gate", action="store_true")
     args = ap.parse_args()
     if args.out is None:
-        args.out = f"/tmp/gemv-bench-{args.mode}.json"
+        # Default: the host's benchmarks/raw (the /raw mount under
+        # ``mjolnir bench kernel``) so a bare run updates the committed raw
+        # the charts read; /tmp fallback when run without that mount.
+        base = "/raw" if os.path.isdir("/raw") else "/tmp"
+        args.out = f"{base}/gemv-decode-bench-{args.mode}.json"
 
     import vllm.vllm_flash_attn.cute.interface as iface
 
@@ -348,16 +373,25 @@ def main() -> int:
     print(f"[{args.mode}] prep done; server load now: {load0}", flush=True)
 
     # --- wait for a clean window ---------------------------------------------
+    offline = False
     if args.no_gate:
         window_start = time.time()
         print(f"[{args.mode}] SMOKE MODE (--no-gate): window not gated")
     else:
-        window_start = wait_for_idle(mon)
-        if window_start is None:
+        window = wait_for_idle(mon)
+        if window is None:
             print(f"[{args.mode}] TIMEOUT waiting for 0/0 window after {WAIT_TIMEOUT_S}s")
             mon.stop()
             return 3
-        print(f"[{args.mode}] CLEAN WINDOW OPEN (3 consecutive 0/0 samples)", flush=True)
+        if window == "offline":
+            window_start = time.time()
+            offline = True
+            print(f"[{args.mode}] vLLM metrics unreachable ({METRICS_URL}) — "
+                  f"server offline; running UNGATED (nothing co-located to gate against)",
+                  flush=True)
+        else:
+            window_start = window
+            print(f"[{args.mode}] CLEAN WINDOW OPEN (3 consecutive 0/0 samples)", flush=True)
 
     # --- Phase B: measurement window -----------------------------------------
     results: dict[str, dict] = {}
@@ -378,7 +412,18 @@ def main() -> int:
     load_end = server_load()
     mon.stop()
     in_window = [(ts, load) for ts, load in mon.trace if window_start <= ts <= window_end]
-    dirty = [s for s in in_window if s[1] is None or s[1] != (0.0, 0.0)]
+    # Unreachable samples count as contamination only if the server WAS
+    # reachable earlier in this run (a drop after being up may hide load);
+    # if it is offline the whole time, "unreachable" == "nothing on the GPU".
+    saw_reachable = any(load is not None for _, load in mon.trace)
+    dirty: list = []
+    for s in in_window:
+        load = s[1]
+        if load is None:
+            if saw_reachable:
+                dirty.append(s)
+        elif load != (0.0, 0.0):
+            dirty.append(s)
     clean = not dirty
 
     ctor_verdict: dict | None = None
@@ -401,6 +446,7 @@ def main() -> int:
         "env": env,
         "window": {
             "start": window_start, "end": window_end,
+            "gated": not args.no_gate and not offline,
             "clean": clean, "num_samples": len(in_window), "dirty_samples": dirty,
             "server_load_before_wait": load0, "server_load_at_end": load_end,
         },
@@ -414,7 +460,10 @@ def main() -> int:
     print(f"[{args.mode}] window clean: {clean} (samples={len(in_window)}, dirty={len(dirty)})")
     if ctor_verdict:
         print(f"[{args.mode}] ctor verification: {ctor_verdict}")
-    print(f"[{args.mode}] VERDICT: {'CLEAN' if clean else 'DIRTY'}")
+    verdict = "CLEAN" if clean else "DIRTY"
+    if args.no_gate or offline:
+        verdict += " (ungated: " + ("--no-gate" if args.no_gate else "vLLM offline") + ")"
+    print(f"[{args.mode}] VERDICT: {verdict}")
     return 0 if clean else 2
 
 
