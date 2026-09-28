@@ -1,5 +1,7 @@
 """The ``mjolnir`` CLI — one command surface for the whole repo.
 
+    mjolnir hw setup|status             pre-configure the Thor host (HW
+                                        provisioning, idempotent)
     mjolnir serve up|down|status|logs    drive the vLLM container
     mjolnir model [use|list]            active model/config (bare = arrow-key
                                         picker over configs/)
@@ -10,11 +12,14 @@
     mjolnir bench perf|ab|kernel        end-to-end perf / A/B / kernel benches
     mjolnir verify                      kernel correctness suites
     mjolnir plot|history                charts + the raw-data log
+    mjolnir litellm up|down|status|logs  the LiteLLM proxy stack (independent
+                                        of the vLLM server)
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -30,7 +35,7 @@ from mjolnir import __version__
 from mjolnir.config import (BACKEND_LABELS, BASELINE_QUANT, DEFAULT_QUANT,
                             Settings, ConfigEntry, load_layout, resolve,
                             scan_all_configs, user_configs_dir)
-from mjolnir import benchy, dockerctl, plots, picker, tasks, vfa
+from mjolnir import benchy, dockerctl, litellm, plots, picker, tasks, thor, vfa
 
 _console = Console()
 
@@ -85,6 +90,21 @@ image_app = typer.Typer(help="Pick the active vLLM image / build the patched one
                         cls=_picker_group(lambda: image_use(None)))
 vfa_app = typer.Typer(help="The GEMV'd vllm_flash_attn tree (kernel iteration).",
                       no_args_is_help=True, context_settings=_HELP_CTX)
+litellm_app = typer.Typer(
+    help="The LiteLLM proxy stack (proxy + postgres + redis) — independent "
+         "of the vLLM server: 'litellm down' leaves vLLM running, and "
+         "'serve down' leaves the proxy up. Reads your template from the "
+         "litellm data dir, ~/.local/share/mjolnir/litellm/ (see "
+         "docker/litellm/).",
+     no_args_is_help=True, context_settings=_HELP_CTX)
+hw_app = typer.Typer(
+    help="Thor host pre-configuration — one-time, idempotent provisioning "
+         "(sudo where needed): headless boot target, apt upgrade, Docker + "
+         "NVIDIA default runtime, pip, jtop, swap, fan profiles "
+         "(recommended + max installed, default selected), service "
+         "cleanup, locked clocks, MAXN power mode. Run 'hw setup' before "
+         "serving or benchmarking.",
+    no_args_is_help=True, context_settings=_HELP_CTX)
 
 app = typer.Typer(
     context_settings=_HELP_CTX,
@@ -96,6 +116,8 @@ app.add_typer(bench_app, name="bench")
 app.add_typer(model_app, name="model")
 app.add_typer(image_app, name="image")
 app.add_typer(vfa_app, name="vfa")
+app.add_typer(litellm_app, name="litellm")
+app.add_typer(hw_app, name="hw")
 
 
 def _state_file() -> Path:
@@ -444,6 +466,159 @@ def vfa_prepare(image: Optional[str] = typer.Option(None, "--image"),
         raise typer.Exit(1)
 
 
+# ── litellm ─────────────────────────────────────────────────────────────────
+
+@litellm_app.command("up")
+def litellm_up(model: Optional[str] = typer.Option(None, "--model"),
+               config: Optional[str] = typer.Option(None, "--config",
+                                                   help="config quant name, "
+                                                        "e.g. NVFP4_FA4hd256"),
+               port: Optional[int] = typer.Option(None, "--port",
+                                                  help=f"host port of the "
+                                                       f"proxy (default "
+                                                       f"{litellm.DEFAULT_PROXY_PORT})"),
+               wait: bool = typer.Option(True, "--wait/--no-wait",
+                                         help="wait for the proxy's "
+                                              "liveliness before returning"),
+               wait_timeout: float = typer.Option(600.0, "--wait-timeout"),
+               dry_run: bool = typer.Option(False, "--dry-run")):
+    """Render the config from your template (in the litellm data dir,
+    ~/.local/share/mjolnir/litellm/) with the currently selected
+    model/config, and start the stack (proxy + postgres + redis). The vLLM
+    server is reached via the host — it may be up or down."""
+    s = _settings(model, config, None, None)
+    try:
+        litellm.up(s, proxy_port=port, wait=wait,
+                   wait_timeout_s=wait_timeout, dry_run=dry_run)
+    except (litellm.LitellmError, FileNotFoundError) as e:
+        typer.secho(str(e), fg=typer.colors.RED, err=True)
+        raise typer.Exit(4 if "not found" in str(e) else 1)
+    typer.secho("\n  proxy:  mjolnir litellm status", fg=typer.colors.GREEN)
+
+
+@litellm_app.command("down")
+def litellm_down(purge: bool = typer.Option(False, "--purge",
+                                            help="also wipe the stack data "
+                                                 "(postgres + redis)"),
+                 dry_run: bool = typer.Option(False, "--dry-run")):
+    """Stop the stack (the vLLM server keeps running; data kept by
+    default, --purge wipes postgres + redis state)."""
+    raise typer.Exit(litellm.down(purge=purge, dry_run=dry_run))
+
+
+@litellm_app.command("status")
+def litellm_status(port: Optional[int] = typer.Option(None, "--port")):
+    """Container state + proxy liveliness + the rendered config path."""
+    s = _settings(None, None, None, None)
+    try:
+        st = litellm.status(s, port)
+    except FileNotFoundError as e:
+        typer.secho(str(e), fg=typer.colors.RED, err=True)
+        raise typer.Exit(4)
+    typer.echo(json.dumps(st, indent=2))
+
+
+@litellm_app.command("logs")
+def litellm_logs(follow: bool = typer.Option(False, "--follow", "-f"),
+                 tail: int = typer.Option(100, "--tail")):
+    """Tail the proxy container logs."""
+    raise typer.Exit(litellm.logs(follow=follow, tail=tail))
+
+
+@litellm_app.command("config")
+def litellm_config(model: Optional[str] = typer.Option(None, "--model"),
+                   config: Optional[str] = typer.Option(None, "--config"),
+                   show: bool = typer.Option(False, "--show",
+                                             help="print the rendered "
+                                                  "config instead of just "
+                                                  "validating it")):
+    """Render the template with the current model/config (no containers) —
+    validates the variables and the YAML."""
+    s = _settings(model, config, None, None)
+    try:
+        p = litellm.render_config(s)
+    except (litellm.LitellmError, FileNotFoundError) as e:
+        typer.secho(str(e), fg=typer.colors.RED, err=True)
+        raise typer.Exit(4 if "not found" in str(e) else 1)
+    typer.secho(f"rendered ok: {p}  (model: {s.served_model})",
+                fg=typer.colors.GREEN)
+    if show:
+        typer.echo(p.read_text())
+
+
+# ── hw ─────────────────────────────────────────────────────────────────────
+
+@hw_app.command("setup")
+def hw_setup(yes: bool = typer.Option(False, "--yes", "-y",
+                                      help="don't prompt to continue"),
+             upgrade: bool = typer.Option(True, "--upgrade/--no-upgrade",
+                                          help="apt update + full-upgrade "
+                                               "(default on — the original "
+                                               "script's NVIDIA-carrier "
+                                               "path)"),
+             keep_gui: bool = typer.Option(False, "--keep-gui",
+                                           help="keep the graphical boot "
+                                                "target (default: headless "
+                                                "multi-user)"),
+             fan_profile: str = typer.Option("recommended", "--fan-profile",
+                                            help="recommended (default) | "
+                                                 "max | cool | quiet — "
+                                                 "recommended/max are "
+                                                 "installed by this step if "
+                                                 "missing"),
+             swap_size: int = typer.Option(32, "--swap-size",
+                                           help="swap file size in GB "
+                                                "(default 32 — the 128 GB "
+                                                "Thor SoM)"),
+             skip: str = typer.Option("", "--skip",
+                                      help="comma-separated steps to skip: "
+                                           "gui,upgrade,pip,docker,jtop,"
+                                           "memory,fan,host,clocks,power"),
+             reboot: bool = typer.Option(False, "--reboot",
+                                        help="reboot at the end if a step "
+                                             "required one (non-interactive)"),
+             dry_run: bool = typer.Option(False, "--dry-run",
+                                         help="print the plan, change "
+                                              "nothing")):
+    """Pre-configure the Thor host (port of the ~/thor HW setup script).
+
+    Runs ``scripts/hw/setup-thor.sh``: headless boot target, apt upgrade,
+    Docker + NVIDIA default runtime, pip, jtop, 32 GB swap (zRAM off),
+    the fan profiles (``recommended`` + ``max`` installed per-profile
+    gated, with the .bck rollback backup; default selected —
+    ``recommended`` by default), service cleanup, locked max clocks,
+    MAXN power mode. Idempotent — safe to re-run; the script asks for
+    sudo."""
+    try:
+        rc = thor.run_setup(yes=yes, upgrade=upgrade, keep_gui=keep_gui,
+                            fan_profile=fan_profile, swap_size=swap_size,
+                            skip=skip, reboot=reboot, dry_run=dry_run)
+    except (ValueError, FileNotFoundError) as e:
+        typer.secho(str(e), fg=typer.colors.RED, err=True)
+        raise typer.Exit(4)
+    raise typer.Exit(rc)
+
+
+@hw_app.command("status")
+def hw_status():
+    """Installed fan profiles and the selected default (read-only, no sudo).
+
+    The daemon's live state (which profile it is actually running) needs
+    sudo — check it with `sudo nvfancontrol -q`."""
+    conf = Path(os.environ.get("MJOLNIR_NVFANCONF", "/etc/nvfancontrol.conf"))
+    if not conf.exists():
+        typer.secho(f"no conf at {conf}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(4)
+    text = conf.read_text()
+    profiles = re.findall(r"^[ \t]*FAN_PROFILE\s+(\w+)", text, re.M)
+    m = re.search(r"^[ \t]*FAN_DEFAULT_PROFILE\s+(\S+)", text, re.M)
+    bck = conf.with_name(conf.name + ".bck")
+    print(f"conf:     {conf}")
+    print(f"profiles: {', '.join(profiles)}")
+    print(f"default:  {m.group(1) if m else '<unset>'}")
+    print(f"backup:   {bck}" + (" (exists)" if bck.exists() else " (missing)"))
+
+
 # ── gate ────────────────────────────────────────────────────────────────────
 
 @app.command()
@@ -463,12 +638,14 @@ def gate(port: Optional[int] = typer.Option(None, "--port"),
 # ── bench ───────────────────────────────────────────────────────────────────
 
 @bench_app.command("perf")
-def bench_perf(runs: int = typer.Option(5, "--runs",
+def bench_perf(runs: int = typer.Option(6, "--runs",
                                         help="measured runs per cell "
                                              "(llama-benchy --runs)"),
-                warmup_runs: int = typer.Option(2, "--warmup-runs"),
-                repeat: int = typer.Option(3, "--repeat",
-                                           help="independent gated sweeps"),
+               warmup_runs: int = typer.Option(2, "--warmup-runs"),
+               repeat: int = typer.Option(1, "--repeat",
+                                          help="independent gated sweeps "
+                                               "(default: one sweep, 6 runs "
+                                               "per cell)"),
                 depths: str = typer.Option("0,4096,8192", "--depths"),
                 concurrency: str = typer.Option("1,2,4", "--concurrency"),
                 pp: int = typer.Option(2048, "--pp"),
@@ -573,8 +750,8 @@ def bench_ab(backends: str = typer.Option(f"{DEFAULT_QUANT},{BASELINE_QUANT}",
                                                "'<model>/<config>' or "
                                                "'<image>:<model>/<config>' — "
                                                "available: mjolnir model list"),
-             runs: int = typer.Option(5, "--runs"),
-             repeat: int = typer.Option(2, "--repeat"),
+              runs: int = typer.Option(6, "--runs"),
+              repeat: int = typer.Option(1, "--repeat"),
              gate: bool = typer.Option(True, "--gate/--no-gate"),
              model: Optional[str] = typer.Option(None, "--model"),
              image: Optional[str] = typer.Option(None, "--image",
@@ -685,12 +862,13 @@ def verify(image: Optional[str] = typer.Option(None, "--image"),
 # ── plot / history ──────────────────────────────────────────────────────────
 
 @app.command()
-def plot(concurrency: int = typer.Option(1, "--concurrency"),
-         context: int = typer.Option(8192, "--context")):
-    """Render the README charts (kernel.png, fa4-vs-fi.png, history.png)."""
+def plot():
+    """Render the README charts (kernel-microbench.png, kernel-length.png,
+    vllm-vs-mjolnir-image.png, bench-compare.png, tg-variability.png,
+    ttfr-by-context.png)."""
     layout = load_layout()
     try:
-        plots.render_all(layout, concurrency, context)
+        plots.render_all(layout)
     except RuntimeError as e:
         typer.secho(str(e), fg=typer.colors.RED, err=True)
         raise typer.Exit(1)

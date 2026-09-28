@@ -12,7 +12,7 @@
 
 <p align="center">
   <b><em>Mjölnir</em></b> <sup>(MYOL-nir)</sup>
-   — <em>serve LLM models on a <b>Jetson AGX Thor</b>,<br/>with a decode kernel built for exactly that hardware.</em>
+   — <em>serve LLM models on a <b>Jetson AGX Thor</b> with a decode kernel built for exactly that hardware.</em>
 </p>
 
 <p align="center">
@@ -23,7 +23,7 @@
   <a href="https://github.com/thor-arena/mjolnir/issues">Issues</a>
 </p>
 
-## What is Mjolnir?
+## What is ⚡ Mjolnir?
 
 *Mjölnir* is Old Norse for "Thor's hammer" — the project name is
 pronounced **"MYOL-nir"**, stress on the first syllable.
@@ -42,12 +42,16 @@ Out of the box, vLLM has no fast path for the biggest attention layers of
 models like Qwen3.8-27B on this GPU. Measured on Thor (first gated A/B,
 2026-09-26 · kernel bench, 2026-09-27 — [Benchmarks](#benchmarks)):
 
-| | stock vLLM | Mjolnir |
+| | ⚡ Mjolnir FlashInfer | ⚡ Mjolnir FlashAttention 4 (GEMV) |
 |---|---|---|
-| token generation (e2e, c=1, 8K ctx) | 24.4 tokens/s | 25.0 t/s (+2.2%) GEMV leg · 25.4 t/s (+4.1%) FlashInfer leg |
-| prompt processing (e2e, c=1, 8K ctx) | 2 469 tokens/s | 3 557 t/s (**+44%**) GEMV leg · 2 938 t/s (+19%) FlashInfer leg |
-| decode kernel (L=8192, gated window) | 190.6 µs — the platform baseline (FlashInfer) | 223.4 µs GEMV (**+17%** in-window); 209.8 µs 1-CTA carve-out — fastest in the latest session (directional) |
-| model memory (KV cache) | 16-bit — 2× the traffic of 8-bit | 8-bit KV cache |
+| token generation (e2e, c=1, 8K ctx) | <b>25.4 t/s</b> <b style="color:#1a7f37">+4.1%</b> | <b>25.0 t/s</b> <b style="color:#1a7f37">+2.2%</b> |
+| prompt processing (e2e, c=1, 8K ctx) | 2 938 t/s <b style="color:#1a7f37">+19%</b> | 3 557 t/s <b style="color:#1a7f37">+44%</b> |
+| decode kernel (L=8192) | <b>190.6 µs</b> — the in-window baseline | 223.4 µs (**+17%** in-window)<br />209.8 µs 1-CTA carve-out (directional) |
+| model memory (KV cache) | 8-bit | 8-bit |
+
+Deltas vs stock vLLM on Thor (24.4 t/s tg · 2 469 t/s pp · 190.6 µs decode
+kernel, same gated window) — the full tables are in
+[Benchmarks](#benchmarks).
 
 So: the stock path leaves bandwidth on the table, and Mjolnir's kernels
 close the gap — while the rest of the stack (speculative decoding,
@@ -370,10 +374,9 @@ kernel work): [`docs/faq/index.md`](docs/faq/index.md).
 
 ## Roadmap
 
-- **E2e follow-through** — the first gated A/B has landed (2026-09-26: both
-  legs + a rescued stock baseline in `history.jsonl`); open: the GEMV leg
-  regresses at c=4 (−15.4% at 8K ctx) — investigate, then re-baseline the
-  charts.
+- **First gated end-to-end A/B** — `mjolnir bench ab` (NVFP4_FA4hd256 vs
+  NVFP4 on v13): the GEMV row in `history.jsonl` + re-rendered charts; then
+  re-measure the seeded rows under `--runs 6` and re-baseline.
 - **GEMV kernel** — mma.sync tile-shape variant for exact FlashInfer parity
   (the remaining ~17%, in-window); varlen-M dispatch (MTP verify, M≤8);
   large-L validation of the stages=16 ring (L=32K/64K, where KV leaves L2).
