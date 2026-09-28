@@ -11,7 +11,7 @@
     mjolnir gate                        the clean-window gate
     mjolnir bench perf|ab|kernel        end-to-end perf / A/B / kernel benches
     mjolnir verify                      kernel correctness suites
-    mjolnir plot|history                charts + the raw-data log
+    mjolnir plot|history                charts (+ README.md with --readme) + the raw-data log
     mjolnir litellm up|down|status|logs  the LiteLLM proxy stack (independent
                                         of the vLLM server)
 """
@@ -35,7 +35,8 @@ from mjolnir import __version__
 from mjolnir.config import (BACKEND_LABELS, BASELINE_QUANT, DEFAULT_QUANT,
                             Settings, ConfigEntry, load_layout, resolve,
                             scan_all_configs, user_configs_dir)
-from mjolnir import benchy, dockerctl, litellm, plots, picker, tasks, thor, vfa
+from mjolnir import (benchy, dockerctl, litellm, plots, picker, readme, tasks,
+                    thor, vfa)
 
 _console = Console()
 
@@ -687,6 +688,11 @@ def bench_perf(runs: int = typer.Option(6, "--runs",
         except RuntimeError as e:
             typer.secho(f"(plots skipped: {e})", fg=typer.colors.YELLOW,
                         err=True)
+        try:
+            readme.render_readme(layout)
+        except (RuntimeError, FileNotFoundError) as e:
+            typer.secho(f"(readme skipped: {e})", fg=typer.colors.YELLOW,
+                        err=True)
 
 
 def _ab_legs(specs: str, default_model: str, default_image: str,
@@ -797,6 +803,10 @@ def bench_ab(backends: str = typer.Option(f"{DEFAULT_QUANT},{BASELINE_QUANT}",
         plots.render_all(layout)
     except RuntimeError as e:
         typer.secho(f"(plots skipped: {e})", fg=typer.colors.YELLOW, err=True)
+    try:
+        readme.render_readme(layout)
+    except (RuntimeError, FileNotFoundError) as e:
+        typer.secho(f"(readme skipped: {e})", fg=typer.colors.YELLOW, err=True)
 
 
 @bench_app.command("kernel",
@@ -862,16 +872,34 @@ def verify(image: Optional[str] = typer.Option(None, "--image"),
 # ── plot / history ──────────────────────────────────────────────────────────
 
 @app.command()
-def plot():
+def plot(render_readme: bool = typer.Option(False, "--readme",
+            help="also render README.md from the README.md.j2 template "
+                 "(every table + number computed from the committed raw "
+                 "data)"),
+         readme_template: Optional[Path] = typer.Option(
+             None, "--readme-template",
+             help="template override (default: <repo>/README.md.j2)"),
+         readme_out: Optional[Path] = typer.Option(
+             None, "--readme-out",
+             help="output override (default: <repo>/README.md)")):
     """Render the README charts (kernel-microbench.png, kernel-length.png,
     vllm-vs-mjolnir-image.png, bench-compare.png, tg-variability.png,
-    ttfr-by-context.png)."""
+    ttfr-by-context.png). With --readme, also re-render README.md from the
+    repo-root README.md.j2 template: all tables + numbers are computed from
+    the committed raw data in benchmarks/."""
     layout = load_layout()
     try:
         plots.render_all(layout)
     except RuntimeError as e:
         typer.secho(str(e), fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
+    if render_readme:
+        try:
+            readme.render_readme(layout, template=readme_template,
+                                 out=readme_out)
+        except (RuntimeError, FileNotFoundError, OSError) as e:
+            typer.secho(str(e), fg=typer.colors.RED, err=True)
+            raise typer.Exit(1)
 
 
 def _ctx_label(ctx: int | None) -> str:
