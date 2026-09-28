@@ -30,9 +30,11 @@
 It is a ready-to-run vLLM image and a single CLI for serving LLM models on the NVIDIA Jetson AGX Thor (`sm_110a`). One command starts an OpenAI-compatible server, another benchmarks it, another verifies the custom kernel against a reference implementation. The defaults are baked in for `{{ ctx.model }}`, so the first command already does the right
 thing.
 
-<!-- <img src="assets/benchmarks/bench-compare.png" width="100%"> -->
+**Why it exists.** Upstream vLLM has no working FA4 path on `sm_110`. For the head_dim=256 attention layers of models like `{{ ctx.model }}`, it falls back to Flash Attention 2. FA2 doesn't support an 8-bit KV cache, so those layers get forced to bf16 KV. That doubles the memory traffic on a device where memory bandwidth is the bottleneck. Every generated token re-reads the whole KV cache, and on a 273 GB/s edge GPU, that read sets your tokens per second. Measured on Jetson Thor:
 
-**Why it exists.** Serving a large model on a single GPU is mostly one bottleneck: every generated token re-reads the model's entire memory of the conversation, and that read is what sets your tokens-per-second. Out of the box, vLLM has no fast path for the biggest attention layers of models like {{ ctx.model }} on this GPU. Measured on Jetson Thor:
+<p align="center">
+  <img src="assets/opening-infographic.png" alt="Mjolnir vs stock vLLM — e2e decode and prefill" width="100%">
+</p>
 
 {% if ctx.table_intro -%}
 {{ ctx.table_intro }}
