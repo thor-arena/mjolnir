@@ -835,11 +835,28 @@ def bench_kernel(task: str = typer.Argument(..., help="task name — see "
                   skip_preflight: bool = typer.Option(False, "--skip-preflight"),
                   help_list: bool = typer.Option(False, "--help-list",
                                                 help="list the tasks")):
-    """Run a kernel verification / benchmark (gated docker task)."""
+    """Run a kernel verification / benchmark (gated docker task).
+
+    ``all`` = the full GEMV bench set: gemv-ringfix + the four gemv-bench
+    modes, one gated window per leg (first failure stops the set).
+    """
     if help_list:
         for t in tasks.TASKS:
             typer.echo(f"  {t.name:<15} [{t.kind:<5}]  {t.desc}")
+        typer.echo(f"  {'all':<15} [set   ]  full GEMV bench set: gemv-ringfix "
+                   "+ gemv-bench in all 4 modes (one gated window each)")
         raise typer.Exit(0)
+    if task == "all":
+        if args:
+            typer.secho("ERROR: 'all' runs the fixed bench set — per-leg "
+                        "args are not supported.", fg=typer.colors.RED,
+                        err=True)
+            raise typer.Exit(4)
+        s = _settings(None, None, image, port)
+        raise typer.Exit(tasks.run_all_bench(s, image=image,
+                                             vfa_tree=vfa_tree,
+                                             dry_run=dry_run,
+                                             skip_preflight=skip_preflight))
     s = _settings(None, None, image, port)
     raise typer.Exit(tasks.run_task(s, task, args or [], image=image,
                                     vfa_tree=vfa_tree, dry_run=dry_run,

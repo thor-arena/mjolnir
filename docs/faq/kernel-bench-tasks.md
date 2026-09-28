@@ -29,6 +29,7 @@ gemv-stages     [bench]  GEMV stages 2 vs 16 vs fp32 ref (ring fix bit-neutral)
 gemv-bench      [bench]  GEMV 4-mode bench (gemv_dense/gemv_paged/fa4_1cta/flashinfer)
 gemv-ringfix    [bench]  ns sweep + stages contrast + FI in one gated window
 gemv-ncu        [bench]  ncu driver (NCU_L/NCU_NS/NCU_STAGES/NCU_ITERS env)
+all             [set   ]  full GEMV bench set: gemv-ringfix + gemv-bench in all 4 modes
 ```
 
 ## Running them
@@ -40,10 +41,14 @@ mjolnir bench kernel functional
 # sm_110 gate-probe canaries in a fresh container (no server needed):
 mjolnir image gates            # == mjolnir bench kernel gates
 
-# gated benches — server must be up (mjolnir serve up), and the vfa tree:
+# gated benches — server up = gated window (mjolnir serve up), offline = ungated run:
 mjolnir vfa prepare
 mjolnir verify                          # all GEMV correctness suites
-mjolnir bench kernel gemv-bench --mode all
+mjolnir bench kernel gemv-bench --mode gemv_dense
+
+# the whole GEMV bench set in one command (one gated window per leg,
+# stops at the first failure, raws land in benchmarks/raw/):
+mjolnir bench kernel all --port 32768
 ```
 
 ## Getting raw numbers (the grep-able contract)

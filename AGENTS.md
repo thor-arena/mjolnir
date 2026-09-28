@@ -143,6 +143,9 @@ or run it as a CLI; do not copy its logic into a new bench.
 - `mjolnir bench kernel functional` — the no-GPU functional check.
 - `mjolnir bench kernel gemv-ringfix` — a gated GEMV bench (server up = gated
   window; offline = ungated run).
+- `mjolnir bench kernel all --port <p>` — the full GEMV bench set in one go
+  (gemv-ringfix + gemv-bench in all 4 modes), one gated window per leg, first
+  failure stops the set.
 - `mjolnir bench kernel gemv-bench --dry-run` — preview the docker command (no container).
 
 **Arg model:** launcher flags (`--image`, `--vfa-tree`, `--dry-run`, ...) are

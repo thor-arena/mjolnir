@@ -219,6 +219,45 @@ def run_task(s: Settings, name: str, script_args: list[str],
     return subprocess.call(cmd)
 
 
+ALL_KERNEL_BENCHES: list[tuple[str, list[str]]] = [
+    ("gemv-ringfix", []),
+    ("gemv-bench", ["--mode", "gemv_dense"]),
+    ("gemv-bench", ["--mode", "gemv_paged"]),
+    ("gemv-bench", ["--mode", "fa4_1cta"]),
+    ("gemv-bench", ["--mode", "flashinfer"]),
+]
+
+
+def run_all_bench(s: Settings, image: str | None = None,
+                  vfa_tree: Path | None = None, dry_run: bool = False,
+                  skip_preflight: bool = False) -> int:
+    """The full GEMV bench set (``bench kernel all``): gemv-ringfix + the
+    four gemv-bench modes, one gated window per leg, stopping at the first
+    failure. Each bare leg writes its raw JSON into benchmarks/raw (the
+    /raw mount). Returns the exit code."""
+    root = find_repo_root()
+    default_tree = root / "vfa-tree" / "vllm_flash_attn"
+    rc = 0
+    for i, (name, extra) in enumerate(ALL_KERNEL_BENCHES):
+        label = f"{name} {' '.join(extra)}".strip()
+        print(f"\n── bench kernel {label} " + "─" * 40, file=sys.stderr)
+        # The first real leg rebuilds the default GEMV'd tree; the rest reuse
+        # it (opting out of the per-leg rebuild — same tree, same window set).
+        reuse = vfa_tree if vfa_tree is not None else (
+            default_tree if i > 0 and not dry_run else None)
+        r = run_task(s, name, extra, image=image, vfa_tree=reuse,
+                     dry_run=dry_run, skip_preflight=skip_preflight)
+        if r != 0:
+            print(f"[mjolnir] {label} FAILED (exit {r}) — stopping the set",
+                  file=sys.stderr)
+            rc = r
+            break
+    if rc == 0 and not dry_run:
+        print("\n  all GEMV bench legs done "
+              "(raws in benchmarks/raw/)", file=sys.stderr)
+    return rc
+
+
 def _run_gate(s: Settings, script_args: list[str], dry_run: bool) -> int:
     """Run the clean-window gate on the host (no container)."""
     from mjolnir.gate import wait_for_idle, server_load
