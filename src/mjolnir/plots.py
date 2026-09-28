@@ -1,9 +1,13 @@
 """Mjolnir charts — the repo's face on GitHub.
 
-Six figures, one design system (``mjolnir.theme``), all dark-dashboard
+Seven figures, one design system (``mjolnir.theme``), all dark-dashboard
 style so the numbers read like a product. Two data sources: the committed
 raw JSONs (kernel microbenches) and ``benchmarks/history.jsonl`` (e2e).
 
+* ``opening-infographic.png`` — the README's opening graphic (``assets/``):
+  full-bleed space background, a white panel with the two hero e2e bar
+  charts (GEMV vs stock vLLM — decode + prefill) and the big white delta
+  numbers.
 * ``kernel-microbench.png``   — kernel vs kernel (microbench data only, never
   e2e): the GEMV SplitKV ns sweep in one clean window + FA4-vs-FlashInfer
   decode µs vs context.
@@ -690,8 +694,190 @@ def render_ttfr(layout: RepoLayout) -> list[Path]:
     return [_save(fig, layout.charts_dir / "ttfr-by-context.png")]
 
 
+# ── opening-infographic.png (the README hero graphic) ────────────────────────
+
+def _pct(v: float) -> str:
+    """Signed percent, repo sign convention (U+2212 minus), 1 decimal max."""
+    s = "\u2212" if v < 0 else "+"
+    a = f"{abs(v):.1f}".rstrip("0").rstrip(".")
+    return f"{s}{a if a else '0'}%"
+
+
+def _display_family() -> str:
+    """A clean display face for the hero numbers — first static-weight
+    system font available (Noto Sans on Ubuntu/Thor; the fallbacks are the
+    Helvetica/Arial clones). Static files, not variable: matplotlib renders
+    a variable font at its default (regular) instance, so a variable "Bold"
+    would come out thin."""
+    from matplotlib import font_manager
+    for fam in ("Noto Sans", "Nimbus Sans", "Liberation Sans", "DejaVu Sans"):
+        try:
+            path = font_manager.findfont(fam, fallback_to_default=False)
+        except Exception:  # noqa: BLE001
+            continue
+        if path and "dejavu" not in Path(path).name.lower():
+            return fam
+    return "DejaVu Sans"
+
+
+def _hero_pair(layout: RepoLayout, metric: str):
+    """(ctx, stock_mean, gemv_mean) for the hero e2e scenario — c=1 at the
+    largest context the stock (native) and GEMV backends both cover — or
+    None when either backend row is missing from history."""
+    records = load_records(layout.history_file)
+    latest = {r["backend"]: r for r in _unique_benches(records).values()}
+    stock = next((r for b, r in latest.items()
+                  if "native" in b.lower() or "stock" in b.lower()), None)
+    gemv = next((r for b, r in latest.items() if "gemv" in b.lower()), None)
+    if not stock or not gemv:
+        return None
+    ctxs = set()
+    for r in (stock, gemv):
+        for c in r.get("cells", []):
+            if c.get("concurrency") == 1 and \
+                    (c.get(metric) or {}).get("mean") is not None:
+                ctxs.add(c.get("context") or 0)
+    if not ctxs:
+        return None
+    ctx = max(ctxs)
+    sv = _cell_metric(stock, 1, ctx, metric)[0]
+    gv = _cell_metric(gemv, 1, ctx, metric)[0]
+    if sv is None or gv is None:
+        return None
+    return ctx, sv, gv
+
+
+def render_opening_infographic(layout: RepoLayout) -> list[Path]:
+    """The README's opening graphic: ``assets/background.jpeg`` full-bleed at
+    native size; a white panel on the left half holding two e2e bar charts
+    (GEMV decode vs stock-FI decode, GEMV prefill vs stock-FI prefill); big
+    white delta numbers on the right (+N% t/s decode, +N% t/s prefill).
+    Every value comes from ``history.jsonl`` (hero scenario: c=1, the
+    largest context both backends cover)."""
+    dec = _hero_pair(layout, "tg_tps")
+    pre = _hero_pair(layout, "pp_tps")
+    if not dec or not pre:
+        print("[mjolnir] no stock/GEMV e2e pair in history — skipping the "
+              "opening infographic (run: mjolnir bench perf)")
+        return []
+
+    bg_path = layout.repo_root / "assets" / "background.jpeg"
+    if not bg_path.exists():
+        print(f"[mjolnir] {bg_path} missing — skipping the opening "
+              "infographic")
+        return []
+
+    plt = _matplotlib()
+    bg = plt.imread(str(bg_path))
+    H, W = bg.shape[:2]
+    DPI = 100
+    fig = plt.figure(figsize=(W / DPI, H / DPI), dpi=DPI)
+    fig.patch.set_facecolor(theme.BG)
+
+    ax_bg = fig.add_axes([0, 0, 1, 1])
+    ax_bg.set_axis_off()
+    ax_bg.imshow(bg, extent=(0, W, 0, H))  # data y: 0 = bottom, H = top
+
+    def yimg2f(y_img: float) -> float:
+        """Image px from the top → figure fraction from the bottom."""
+        return (H - y_img) / H
+
+    # ── the white card (left half), margins from the edges ─────────────────
+    card_l, card_r = 0.03 * W, 0.46 * W
+    card_t, card_b = 0.06 * H, 0.94 * H
+    from matplotlib.patches import FancyBboxPatch
+    ax_bg.add_patch(FancyBboxPatch(
+        (card_l, H - card_b), card_r - card_l, card_b - card_t,
+        boxstyle=f"round,pad=0,rounding_size={0.025 * H:.0f}",
+        facecolor="white", edgecolor="none", zorder=2))
+
+    _DARK = "#0D1117"
+    _DIM = "#57606A"
+
+    # ── the two panels inside the card ──────────────────────────────────────
+    # pad_x leaves room for the y tick labels ("vLLM" / "Mjolnir") OUTSIDE the
+    # axis, still on the white card.
+    pad_x, pad_y = 0.048 * W, 0.055 * H
+    gap = 0.04 * H
+    in_x0, in_x1 = card_l + pad_x, card_r - pad_x
+    in_t, in_b = card_t + pad_y, card_b - pad_y
+    panel_h = (in_b - in_t - gap) / 2
+
+    def panel_ax(y_img_top: float):
+        ax = fig.add_axes([in_x0 / W, yimg2f(y_img_top + panel_h),
+                           (in_x1 - in_x0) / W, panel_h / H])
+        ax.set_facecolor("white")
+        for s in ax.spines.values():
+            s.set_visible(False)
+        ax.grid(False)
+        ax.set_xticks([])
+        return ax
+
+    panels = [
+        ("decode", dec, "{:.1f}"),
+        ("prefill", pre, "{:,.0f}"),
+    ]
+    for (name, (ctx, stock_v, gemv_v), fmt), y_img_top in zip(
+            panels, (in_t, in_t + panel_h + gap)):
+        ax = panel_ax(y_img_top)
+        stock_v, gemv_v = float(stock_v), float(gemv_v)
+        # Repo order: baseline on top. Labels stay short ("vLLM" /
+        # "Mjolnir") — the tick area outside the axis is narrow.
+        # Gap between the bars = p + h - 1 (data units) — p must stay < 0.5
+        # or the Mjolnir bar overlaps the vLLM one.
+        ys = [1.05, 0.48]  # ~8 px gap, h=0.5
+        vals = [stock_v, gemv_v]
+        colors = [theme.SLATE, theme.ACCENT]
+        labels = ["vLLM", "Mjolnir"]
+        ax.barh(ys, vals, height=0.5, color=colors, zorder=3)
+        xmax = max(vals) * 1.22
+        ax.set_xlim(0, xmax)
+        ax.set_ylim(-0.05, 1.75)  # room below the Mjolnir bar (no crop)
+        ax.set_yticks(ys)
+        ax.set_yticklabels(labels, color=_DARK, fontsize=11)
+        for y, v in zip(ys, vals):
+            ax.text(v + xmax * 0.012, y, fmt.format(v).replace(",", " "),
+                    va="center", ha="left", color=_DARK, fontsize=12.5,
+                    fontweight="bold")
+        # Title + scenario line live INSIDE the panel's top margin.
+        ax.text(0, 1.0, f"{name} — t/s", transform=ax.transAxes,
+                color=_DARK, fontsize=13, fontweight="bold",
+                ha="left", va="top")
+        ax.text(0, 0.90, f"c=1 · {_ctx_label(ctx)} ctx · e2e llama-benchy",
+                transform=ax.transAxes, color=_DIM, fontsize=9.5,
+                ha="left", va="top")
+
+    # ── the big white numbers (right half) ─────────────────────────────────
+    # Right-aligned: the number's right edge and the subtitle's right edge
+    # share one x, set back from the canvas edge.
+    x_r = 0.90
+    disp = _display_family()
+
+    def stat(y_num: float, y_lab: float, text: str, sub: str):
+        fig.text(x_r, y_num, text, ha="right", va="center", color="white",
+                 fontsize=90, fontweight="bold", family=disp)
+        fig.text(x_r, y_lab, sub, ha="right", va="center", color="white",
+                 fontsize=20, family=disp)
+
+    def _stat_sub(d: float, noun: str) -> str:
+        return f"faster {noun}" if d >= 0 else f"slower {noun}"
+
+    d_dec = (dec[2] - dec[1]) / dec[1] * 100
+    d_pre = (pre[2] - pre[1]) / pre[1] * 100
+    stat(0.68, 0.56, _pct(d_dec), _stat_sub(d_dec, "decode speed"))
+    stat(0.30, 0.18, _pct(d_pre), _stat_sub(d_pre, "prompt prefill"))
+
+    out = layout.repo_root / "assets" / "opening-infographic.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=DPI)  # exact canvas: no bbox_inches="tight"
+    print(f"[mjolnir] wrote {out}")
+    plt.close(fig)
+    return [out]
+
+
 def render_all(layout: RepoLayout) -> list[Path]:
     out: list[Path] = []
+    out += render_opening_infographic(layout)
     out += render_kernel_charts(layout)
     out += render_kernel_length(layout)
     out += render_e2e_images(layout)
