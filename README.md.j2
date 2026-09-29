@@ -41,7 +41,7 @@ thing.
 
 ## Quickstart
 
-> [!NOTE]  
+> [!NOTE]
 > Requirements: Jetson AGX Thor (JetPack 7.x.x, `sm_110a`), Docker + NVIDIA
 Container Toolkit, [`uv`](https://docs.astral.sh/uv/).
 
@@ -116,7 +116,7 @@ mjolnir plot                          # Render charts and README.md (--readme)
 mjolnir history                       # Browse benchmark history
 ```
 
-> [!TIP] 
+> [!TIP]
 > - Selections persist to `~/.mjolnir-state.json`; precedence: CLI flag > state
 > - `$MJOLNIR_*` > baked-in default. Raw numbers for grep: any bench takes
 `--out <path>` — e.g. `mjolnir bench kernel gemv-ringfix --out /p/r.json`,
@@ -197,10 +197,10 @@ M=1 decode, GQA 24:4, quantized KV + descales
 
 **Why the stock path is slow.** Upstream has no fast `hd256` decode path for `sm_110`: vLLM's native FlashAttention route ends in a 2-CTA-cluster kernel — the slow path for this shape — and vLLM downgrades `hd256` layers with quantized KV to `FA2` with a `bf16` KV cache (2× the memory traffic). Mjolnir ships a GEMV decode kernel for exactly this shape — pure FMA, dense or paged KV, `fp16`/`bf16`/`e4m3` KV with descales, SplitKV auto-planned for the 20-SM device — default-on in the image, plus the 14-patch vLLM/FlashInfer overlay that makes the rest of the stack work on Thor (spec-decode cudagraphs, GDN prefill enablement, FP8-KV policy gates).
 
-- **Parallelism (SplitKV / ns)**<br> 
+- **Parallelism (SplitKV / ns)**<br>
   The GEMV kernel splits the KV range over `ns` CTAs (LSE partials + exact merge). Same gated window, L={{ ctx.hero_L }} M=1: ns=1 → {{ ctx.ns1_bw }} GB/s nominal, {{ ctx.ns1_us }} µs; ns=20 → {{ ctx.ns20_bw }} GB/s, {{ ctx.ns20_us }} µs (**×{{ ctx.ns_speedup }}**); ns=64 → {{ ctx.ns64_bw }} GB/s but wall-clock turns down ({{ ctx.ns64_us }} µs) — merge/recompute overhead eats the tail. The auto-plan lands ≈ ns=20 in the same window ({{ ctx.auto_us }} µs).
 
-- **CTA width (1-CTA vs 2-CTA)**<br> 
+- **CTA width (1-CTA vs 2-CTA)**<br>
   The dedicated hd256 FA4 kernel runs a 2-CTA cluster; for decode shapes (M≤8) the second CTA halves the per-token KV scan rate. Dropping to 1 CTA (the carve-out) makes it the fastest decode kernel in the latest multi-L session ({{ ctx.cta1_us }} µs at L={{ ctx.cta1_L }}, its own clean window).
 
 - **Ring depth (stages)**<br>
@@ -209,7 +209,7 @@ M=1 decode, GQA 24:4, quantized KV + descales
 - **Why GEMV at all**<br>
   At M=1 the GEMV (vector-load + FMA) class is what the incumbent baseline (FlashInfer) uses; the tensor-core path adds pipeline cost it can't spend. The kernel matches that class and wins back the gap on the memory side — hence "within ~{{ ctx.gemv_vs_fi }}%" in-window ({{ ctx.gemv_us }} vs {{ ctx.fi_us }} µs), with the remaining gap attributed to FI's wider tile shape (192 KB 384-row K+V tiles, 40 CTAs) — a tile-shape redesign, not a tuning knob.
 
-> [!NOTE] 
+> [!NOTE]
 > **Measurement discipline** (normative for every number in the repo): the GPU is shared with the live server and the desktop, so nothing is ever killed to "clean" the GPU; benches run only inside **clean windows** (the live server's queue reads 0/0 for N consecutive samples) and discard dirty runs. Wall-clock is same-window ratios only; absolute kernel claims use **NCU achieved bandwidth** — and on CC 11.0 `dram__bytes.sum` is unavailable, so achieved BW is measured at the L2-fabric level (`lts__t_sectors × 32 B / time`). Full rules: [`docs/methodology/benchmarking.md`](docs/methodology/benchmarking.md).
 
 **Architecture decisions:**

@@ -2,6 +2,23 @@
 # research scripts + CuTe-DSL kernel are deliberately out of scope (kernel
 # naming follows FA conventions, e.g. the running log-sum-exp accumulator).
 repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      # never touch patch/diff files: a whitespace-stripped hunk line changes
+      # what the patch applies to (a lone space is a blank source line)
+      - id: end-of-file-fixer
+        exclude: '\.(patch|diff)$'
+      - id: trailing-whitespace
+        exclude: '\.(patch|diff)$'
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.14
     hooks:
