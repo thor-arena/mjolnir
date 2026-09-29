@@ -7,12 +7,11 @@
   <img src="https://img.shields.io/badge/Jetson-AGX%20Thor-76b900" alt="NVIDIA Jetson AGX Thor">
   <img src="https://img.shields.io/badge/vLLM-0.30.0-black" alt="vLLM 0.30.0">
   <img src="https://img.shields.io/badge/FA4-GEMV%20decode%20kernel-orange" alt="FA4 GEMV decode kernel">
-  <img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="Apache-2.0">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT">
 </p>
 
 <p align="center">
-  <b><em>Mjölnir</em></b> <sup>(MYOL-nir)</sup>
-   — <em>serve LLM models on a <b>Jetson AGX Thor</b> with a decode kernel built for exactly that hardware.</em>
+  <b><em>Mjölnir</em></b> <sup>(MYOL-nir)</sup> — <em>serve LLM models on a <b>Jetson AGX Thor</b> with a decode kernel built for exactly that hardware.</em>
 </p>
 
 <p align="center">
@@ -45,7 +44,7 @@ thing.
 
 ## Quickstart
 
-> [!NOTE]  
+> [!NOTE]
 > Requirements: Jetson AGX Thor (JetPack 7.x.x, `sm_110a`), Docker + NVIDIA
 Container Toolkit, [`uv`](https://docs.astral.sh/uv/).
 
@@ -105,21 +104,22 @@ Kernel code sits in the `sm100_hd256_decode_gemv.py` (CuTe-DSL): a pure-FMA GEMV
 
 ## The CLI
 
-| command | what it does |
-|---|---|
-| `mjolnir` | help + next-steps guide |
-| `mjolnir serve up\|down\|status\|logs` | drive the vLLM container |
-| `mjolnir model [use\|list]` | active model/config (bare = picker over repo `configs/` + user-local `~/.local/share/mjolnir/configs/`) |
-| `mjolnir image [use\|list\|build\|gates]` | active image (bare = picker) / build the patch stack / run the canary gates |
-| `mjolnir bench perf` | gated e2e throughput sweep → raw JSON → history → charts |
-| `mjolnir bench ab` | headline A/B (restarts the server per leg — schedule it) |
-| `mjolnir bench kernel <task>` | gated kernel benches (`--help-list`; `--dry-run` previews) |
-| `mjolnir verify` | GEMV kernel correctness suites (gated, vs fp32 reference) |
-| `mjolnir gate` | the clean-window gate (`--once` = check now) |
-| `mjolnir vfa prepare` | build the GEMV'd `vllm_flash_attn` tree (kernel iteration) |
-| `mjolnir plot` / `mjolnir history` | render the README charts (+ `README.md` from the template with `--readme`) / browse the bench log |
+```bash
+mjolnir                               # Help and next-steps guide
+mjolnir serve [up|down|status|logs]   # Manage the vLLM container
+mjolnir model [use|list]              # Select/list model configs (repo + user-local)
+mjolnir image [use|list|build|gates]  # Select images, build patch stack, run canary gates
+mjolnir bench perf                    # Gated e2e throughput sweep → JSON, history, charts
+mjolnir bench ab                      # Headline A/B benchmark (restarts server per leg)
+mjolnir bench kernel <task>           # Gated kernel benches (--help-list, --dry-run, --all)
+mjolnir verify                        # GEMV correctness suites vs FP32 reference
+mjolnir gate                          # Clean-window gate (--once to check now)
+mjolnir vfa prepare                   # Build GEMV-patched vllm_flash_attn tree
+mjolnir plot                          # Render charts and README.md (--readme)
+mjolnir history                       # Browse benchmark history
+```
 
-> [!TIP] 
+> [!TIP]
 > - Selections persist to `~/.mjolnir-state.json`; precedence: CLI flag > state
 > - `$MJOLNIR_*` > baked-in default. Raw numbers for grep: any bench takes
 `--out <path>` — e.g. `mjolnir bench kernel gemv-ringfix --out /p/r.json`,
@@ -129,7 +129,9 @@ then `grep -E '"(median|p95|bw_gbs_nominal_kv|clean)"' /p/r.json`.
 
 All numbers from committed raw artifacts in [`benchmarks/`](benchmarks/). Kernel tables: **one gated window** each — except the multi-L session, where each kernel runs in its own window (marked). Wall-clock deltas are only meaningful within a window ([methodology](docs/methodology/benchmarking.md)).
 
-<img src="assets/benchmarks/vllm-vs-mjolnir-image.png" width="100%">
+<p align="center">
+  <img src="assets/benchmarks/vllm-vs-mjolnir-image.png" width="100%">
+</p>
 
 ### Mjolnir Kernel
 
@@ -139,7 +141,9 @@ M=1 decode, GQA 24:4, quantized KV + descales
 
 **GEMV SplitKV sweep**
 
-<img src="assets/benchmarks/kernel-microbench.png">
+<p align="center">
+  <img src="assets/benchmarks/kernel-microbench.png">
+</p>
 
 > (300 iters; the nominal KV-BW column is the raw's own `kv_bytes ÷ wall-clock`):
 
@@ -157,7 +161,9 @@ M=1 decode, GQA 24:4, quantized KV + descales
 
 **Multi-L session**
 
-<img src="assets/benchmarks/kernel-length.png" width="100%">
+<p align="center">
+  <img src="assets/benchmarks/kernel-length.png" width="100%">
+</p>
 
 | kernel | L=2048 | L=4096 | L=8192 |
 |---|---:|---:|---:|
@@ -175,7 +181,9 @@ M=1 decode, GQA 24:4, quantized KV + descales
 
 **Token-generation t/s**:
 
-<img src="assets/benchmarks/tg-variability.png" width="100%">
+<p align="center">
+  <img src="assets/benchmarks/tg-variability.png" width="100%">
+</p>
 
 | backend (image, config) | c1 / no ctx | c4 / no ctx | c1 / 4K ctx | c4 / 4K ctx | c1 / 8K ctx | c4 / 8K ctx |
 |---|---|---|---|---|---|---|
@@ -188,7 +196,9 @@ M=1 decode, GQA 24:4, quantized KV + descales
 
 **Prompt-processing t/s**:
 
-<img src="assets/benchmarks/ttfr-by-context.png" width="100%">
+<p align="center">
+  <img src="assets/benchmarks/ttfr-by-context.png" width="100%">
+</p>
 
 | backend | c1 / no ctx | c4 / no ctx | c1 / 4K ctx | c4 / 4K ctx | c1 / 8K ctx | c4 / 8K ctx |
 |---|---|---|---|---|---|---|
@@ -205,10 +215,10 @@ M=1 decode, GQA 24:4, quantized KV + descales
 
 **Why the stock path is slow.** Upstream has no fast `hd256` decode path for `sm_110`: vLLM's native FlashAttention route ends in a 2-CTA-cluster kernel — the slow path for this shape — and vLLM downgrades `hd256` layers with quantized KV to `FA2` with a `bf16` KV cache (2× the memory traffic). Mjolnir ships a GEMV decode kernel for exactly this shape — pure FMA, dense or paged KV, `fp16`/`bf16`/`e4m3` KV with descales, SplitKV auto-planned for the 20-SM device — default-on in the image, plus the 14-patch vLLM/FlashInfer overlay that makes the rest of the stack work on Thor (spec-decode cudagraphs, GDN prefill enablement, FP8-KV policy gates).
 
-- **Parallelism (SplitKV / ns)**<br> 
+- **Parallelism (SplitKV / ns)**<br>
   The GEMV kernel splits the KV range over `ns` CTAs (LSE partials + exact merge). Same gated window, L=8192 M=1: ns=1 → 12.84 GB/s nominal, 1 306.4 µs; ns=20 → 75.42 GB/s, 222.5 µs (**×5.9**); ns=64 → 71.67 GB/s but wall-clock turns down (234.1 µs) — merge/recompute overhead eats the tail. The auto-plan lands ≈ ns=20 in the same window (225.1 µs).
 
-- **CTA width (1-CTA vs 2-CTA)**<br> 
+- **CTA width (1-CTA vs 2-CTA)**<br>
   The dedicated hd256 FA4 kernel runs a 2-CTA cluster; for decode shapes (M≤8) the second CTA halves the per-token KV scan rate. Dropping to 1 CTA (the carve-out) makes it the fastest decode kernel in the latest multi-L session (211.1 µs at L=8192, its own clean window).
 
 - **Ring depth (stages)**<br>
@@ -217,7 +227,7 @@ M=1 decode, GQA 24:4, quantized KV + descales
 - **Why GEMV at all**<br>
   At M=1 the GEMV (vector-load + FMA) class is what the incumbent baseline (FlashInfer) uses; the tensor-core path adds pipeline cost it can't spend. The kernel matches that class and wins back the gap on the memory side — hence "within ~17%" in-window (222.5 vs 189.4 µs), with the remaining gap attributed to FI's wider tile shape (192 KB 384-row K+V tiles, 40 CTAs) — a tile-shape redesign, not a tuning knob.
 
-> [!NOTE] 
+> [!NOTE]
 > **Measurement discipline** (normative for every number in the repo): the GPU is shared with the live server and the desktop, so nothing is ever killed to "clean" the GPU; benches run only inside **clean windows** (the live server's queue reads 0/0 for N consecutive samples) and discard dirty runs. Wall-clock is same-window ratios only; absolute kernel claims use **NCU achieved bandwidth** — and on CC 11.0 `dram__bytes.sum` is unavailable, so achieved BW is measured at the L2-fabric level (`lts__t_sectors × 32 B / time`). Full rules: [`docs/methodology/benchmarking.md`](docs/methodology/benchmarking.md).
 
 **Architecture decisions:**
@@ -268,7 +278,7 @@ M=1 decode, GQA 24:4, quantized KV + descales
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](.github/CONTRIBUTING.md).
 
 **User guides** (serve, defaults, new model configs, A/B benches, base bumps, kernel work): [`docs/faq/index.md`](docs/faq/index.md).
 
@@ -289,6 +299,6 @@ See [SECURITY.md](SECURITY.md) — in particular, the served API is unauthentica
 
 ## License
 
-[Apache-2.0](LICENSE)
+[MIT](LICENSE)
 
-<p align="center"><sub>⚡ Mjölnir — created with 100% ❤️ Edge AI</sub></p>
+<p align="center"><sub>⚡ Mjölnir — built with ❤️, powered 100% by Edge AI. Zero cloud.</sub></p>

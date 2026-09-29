@@ -6,6 +6,7 @@ then the remembered state (``mjolnir model`` / ``mjolnir image`` →
 ``$MJOLNIR_STATE``, default ``~/.mjolnir-state.json``), then ``$MJOLNIR_*``
 env vars. No ``.env`` file required.
 """
+
 from __future__ import annotations
 
 import os
@@ -16,19 +17,19 @@ import yaml
 
 # ── Model / config ───────────────────────────────────────────────────────────
 DEFAULT_MODEL = "Qwen/Qwen3.8-27B"
-DEFAULT_QUANT = "NVFP4_FA4hd256"      # FA4 + the GEMV decode kernel (this repo's default)
-BASELINE_QUANT = "NVFP4"               # FlashInfer baseline config
+DEFAULT_QUANT = "NVFP4_FA4hd256"  # FA4 + the GEMV decode kernel (this repo's default)
+BASELINE_QUANT = "NVFP4"  # FlashInfer baseline config
 SERVED_MODEL_NAME = "Qwen/Qwen3.8-27B"
 
 # ── Image / serving ──────────────────────────────────────────────────────────
 DEFAULT_IMAGE = "mjolnir/vllm-thor:qwen38-sm110-v13"
-DEFAULT_PORT = 6001                      # host port; vLLM metrics live on the same port
+DEFAULT_PORT = 6001  # host port; vLLM metrics live on the same port
 CONTAINER_NAME = "mjolnir-vllm"
 VFA_DIST_PATH = "/usr/local/lib/python3.12/dist-packages/vllm/vllm_flash_attn"
 
 # Friendly backend labels for the history log / charts, keyed by quant config.
 BACKEND_LABELS = {
-    "NVFP4_FA4hd256": "FA4-GEMV",     # FA4 hd256 + our pure-FMA GEMV decode kernel
+    "NVFP4_FA4hd256": "FA4-GEMV",  # FA4 hd256 + our pure-FMA GEMV decode kernel
     "NVFP4": "FlashInfer",
 }
 
@@ -38,8 +39,8 @@ class ConfigEntry:
     """One model config discovered under ``configs/<vendor>/<model>/<quant>.yaml``
     (the repo's configs/ or the user-local dir — see ``source``)."""
 
-    model: str          # "vendor/Model", e.g. "Qwen/Qwen3.8-27B"
-    quant: str          # config name, e.g. "NVFP4_FA4hd256"
+    model: str  # "vendor/Model", e.g. "Qwen/Qwen3.8-27B"
+    quant: str  # config name, e.g. "NVFP4_FA4hd256"
     path: Path
     source: str = "repo"  # "repo" (configs/) | "local" (~/.local/share/mjolnir/configs)
 
@@ -54,9 +55,7 @@ def scan_configs(configs_dir: Path) -> list[ConfigEntry]:
     if not configs_dir.is_dir():
         return out
     for p in sorted(configs_dir.glob("*/*/*.yaml")):
-        out.append(ConfigEntry(
-            model=str(p.parent.relative_to(configs_dir)),
-            quant=p.stem, path=p))
+        out.append(ConfigEntry(model=str(p.parent.relative_to(configs_dir)), quant=p.stem, path=p))
     return out
 
 
@@ -64,9 +63,7 @@ def user_configs_dir() -> Path:
     """The user-local model-config root: ``~/.local/share/mjolnir/configs``
     (under the project data dir ``MJOLNIR_DATA``); override with
     ``$MJOLNIR_CONFIGS_DIR``. Layout: ``<vendor>/<model>/<quant>.yaml``."""
-    return Path(_env("MJOLNIR_CONFIGS_DIR",
-                     str(Path.home() / ".local" / "share" / "mjolnir"
-                         / "configs"))).expanduser()
+    return Path(_env("MJOLNIR_CONFIGS_DIR", str(Path.home() / ".local" / "share" / "mjolnir" / "configs"))).expanduser()
 
 
 def scan_all_configs(layout: RepoLayout | None = None) -> list[ConfigEntry]:
@@ -78,8 +75,7 @@ def scan_all_configs(layout: RepoLayout | None = None) -> list[ConfigEntry]:
     seen = {(e.model, e.quant) for e in entries}
     for e in scan_configs(user_configs_dir()):
         if (e.model, e.quant) not in seen:
-            entries.append(ConfigEntry(model=e.model, quant=e.quant,
-                                       path=e.path, source="local"))
+            entries.append(ConfigEntry(model=e.model, quant=e.quant, path=e.path, source="local"))
             seen.add((e.model, e.quant))
     entries.sort(key=lambda e: (e.model, e.quant))
     return entries
@@ -138,9 +134,7 @@ def find_repo_root() -> Path:
     for cand in [cur, *cur.parents]:
         if (cand / "docker" / "vllm-thor" / "Dockerfile").exists():
             return cand
-    raise FileNotFoundError(
-        "mjolnir repo not found (set $MJOLNIR_REPO to the repo root, or run "
-        "from inside the repo)")
+    raise FileNotFoundError("mjolnir repo not found (set $MJOLNIR_REPO to the repo root, or run from inside the repo)")
 
 
 def load_layout() -> RepoLayout:
@@ -163,9 +157,9 @@ class Settings:
     quant: str = field(default_factory=lambda: _env("MJOLNIR_QUANT", DEFAULT_QUANT))
     image: str = field(default_factory=lambda: _env("MJOLNIR_IMAGE", DEFAULT_IMAGE))
     port: int = field(default_factory=lambda: _env_int("MJOLNIR_PORT", DEFAULT_PORT))
-    gemv: bool = True                      # VLLM_FA4_HD256_GEMV default on: the kernel is the point
+    gemv: bool = True  # VLLM_FA4_HD256_GEMV default on: the kernel is the point
     data_dir: Path = field(default_factory=lambda: Path("~/.local/share/mjolnir").expanduser())
-    label: str | None = None              # explicit backend-label override (history log); else derived from quant
+    label: str | None = None  # explicit backend-label override (history log); else derived from quant
 
     @property
     def config_path(self) -> Path:
@@ -207,9 +201,9 @@ class Settings:
         return self.label or BACKEND_LABELS.get(self.quant, self.quant)
 
 
-def resolve(cli_model: str | None, cli_quant: str | None,
-            cli_image: str | None, cli_port: int | None,
-            gemv: bool | None = None) -> Settings:
+def resolve(
+    cli_model: str | None, cli_quant: str | None, cli_image: str | None, cli_port: int | None, gemv: bool | None = None
+) -> Settings:
     """CLI flags > env vars > defaults."""
     s = Settings()
     if cli_model:

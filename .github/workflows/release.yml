@@ -1,0 +1,117 @@
+# Tag-gated release: quality gates on the tagged commit, then trusted
+# publishing (OIDC, no token) to pypi.org.
+#
+# One-time human setup (do before the first tag):
+#   1. pypi.org: create project `mjolnir` (or add a *pending* publisher) ->
+#      Publishing -> Add trusted publisher -> GitHub Actions:
+#        owner=thor-arena  repo=mjolnir  workflow=release.yml  environment=pypi
+#   2. GitHub repo: Settings -> Environments -> create `pypi`
+#      (optionally add a protection rule: require manual approval).
+#   3. GitHub repo: Settings -> Rules -> ruleset for `v*` tags:
+#      block force-push + block delete (tag immutability defense).
+#
+# Publish requires: job `environment: pypi` + `id-token: write` + NO
+# user/password inputs on the pypa action (that's what enables OIDC).
+# The environment name + this file name (release.yml) must match the
+# PyPI-side registration exactly.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+rc[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+[ab][0-9]+"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tag-validation:
+    runs-on: ubuntu-latest
+    steps:
+      # checkout v7 verifies the tag still points at the triggering commit
+      # (fails loudly on a force-pushed tag); do not set an explicit `ref:`.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Tag points at exactly this commit
+        run: |
+          set -euo pipefail
+          [ "${GITHUB_REF_NAME}" = "$(git describe --tags --exact-match HEAD)" ] \
+            || { echo "::error::tag ${GITHUB_REF_NAME} is not at HEAD"; exit 1; }
+      - name: Tag matches pyproject version
+        run: |
+          set -euo pipefail
+          expected="${GITHUB_REF_NAME#v}"
+          python3 - "$expected" <<'EOF'
+          import sys, tomllib
+          actual = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          if actual != sys.argv[1]:
+              sys.exit(f"::error::tag v{sys.argv[1]} != pyproject version {actual}")
+          EOF
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: ruff check
+        run: uvx ruff@0.14.14 check src/
+      - name: ruff format --check
+        run: uvx ruff@0.14.14 format --check src/
+
+  build:
+    needs: [tag-validation]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          # never cache on a release (cache-poisoning vector; auto is already
+          # off for tag pushes — stated explicitly)
+          enable-cache: false
+      - name: Build sdist + wheel
+        run: uv build --out-dir dist
+      - name: Smoke-test the wheel
+        run: uv run --isolated --no-project --with dist/*.whl mjolnir --help
+      - name: Smoke-test the sdist
+        run: uv run --isolated --no-project --with dist/*.tar.gz mjolnir --help
+      - name: Twine check (metadata sanity)
+        run: uvx twine check dist/*
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: [lint, build]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/mjolnir/
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+      # No user/password inputs => trusted publishing (OIDC). PEP 740
+      # attestations are on by default. skip-existing stays off: fail loudly
+      # on a duplicate upload (PyPI files are immutable — bump + re-tag).
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2

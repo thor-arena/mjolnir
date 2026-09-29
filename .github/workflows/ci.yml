@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      # config in pyproject.toml; version pinned to .pre-commit-config.yaml
+      - name: ruff check
+        run: uvx ruff@0.14.14 check src/
+      - name: ruff format --check
+        run: uvx ruff@0.14.14 format --check src/
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - run: uv sync --extra dev
+      - run: uv run pytest
+
+  readme:
+    # README.md is rendered from README.md.j2 + the committed bench data —
+    # hand edits to it are a drift the render undoes. (Charts themselves can
+    # drift on runner fonts, so the gate is on README.md text only.)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - run: uv sync --extra plot
+      - name: README is reproducible from the raw data
+        run: |
+          uv run mjolnir plot --readme
+          git diff --exit-code -- README.md
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: Byte-compile
+        run: uv run python -m compileall -q src/mjolnir
+      - name: Build sdist + wheel (validates hatchling metadata)
+        run: uv build --out-dir dist
+      - name: Smoke-test the wheel (install + CLI entrypoint)
+        run: uv run --isolated --no-project --with dist/*.whl mjolnir --help
+      - name: Smoke-test the sdist
+        run: uv run --isolated --no-project --with dist/*.tar.gz mjolnir --help
+      - name: Twine check (metadata sanity)
+        run: uvx twine check dist/*

@@ -13,6 +13,7 @@ Metrics source: the vLLM server's Prometheus endpoint (``/metrics`` on its
 serving port). We read ``vllm:num_requests_running`` and
 ``vllm:num_requests_waiting``; the window is clean when both are 0.0.
 """
+
 from __future__ import annotations
 
 import threading
@@ -49,9 +50,12 @@ def server_load(metrics_url: str) -> tuple[float, float] | None:
     return (out["num_requests_running"], out["num_requests_waiting"])
 
 
-def wait_for_idle(metrics_url: str, poll_s: float = DEFAULT_POLL_S,
-                  confirm: int = DEFAULT_CONFIRM,
-                  timeout_s: float = DEFAULT_TIMEOUT_S) -> float | None:
+def wait_for_idle(
+    metrics_url: str,
+    poll_s: float = DEFAULT_POLL_S,
+    confirm: int = DEFAULT_CONFIRM,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+) -> float | None:
     """Block until ``confirm`` consecutive samples read (0,0); return the
     ``time.time()`` of the sample that opened the window, or ``None`` on
     timeout."""
@@ -98,9 +102,13 @@ class CleanWindow:
     window never opens within ``timeout_s``.
     """
 
-    def __init__(self, metrics_url: str, confirm: int = DEFAULT_CONFIRM,
-                 poll_s: float = DEFAULT_POLL_S,
-                 timeout_s: float = DEFAULT_TIMEOUT_S) -> None:
+    def __init__(
+        self,
+        metrics_url: str,
+        confirm: int = DEFAULT_CONFIRM,
+        poll_s: float = DEFAULT_POLL_S,
+        timeout_s: float = DEFAULT_TIMEOUT_S,
+    ) -> None:
         self.metrics_url = metrics_url
         self.confirm = confirm
         self.poll_s = poll_s
@@ -116,8 +124,8 @@ class CleanWindow:
         if all(load is None for _, load in self._mon.trace):
             self._mon.stop()
             raise PreflightError(
-                f"vLLM metrics endpoint {self.metrics_url} is unreachable — "
-                f"is the server up? (mjolnir serve up)")
+                f"vLLM metrics endpoint {self.metrics_url} is unreachable — is the server up? (mjolnir serve up)"
+            )
         self._streak = 0
         self._consumed = 0
         t_start = time.perf_counter()
@@ -125,8 +133,8 @@ class CleanWindow:
             if time.perf_counter() - t_start > self.timeout_s:
                 self._mon.stop()
                 raise TimeoutError(
-                    f"timed out after {self.timeout_s:.0f}s waiting for "
-                    f"{self.confirm} consecutive 0/0 samples")
+                    f"timed out after {self.timeout_s:.0f}s waiting for {self.confirm} consecutive 0/0 samples"
+                )
             self._drain()
             if self._streak >= self.confirm:
                 self.open_ts = self._mon.trace[-1][0]
@@ -142,10 +150,8 @@ class CleanWindow:
     def __exit__(self, exc_type, exc, tb) -> bool:
         self._mon.stop()
         self._drain()
-        in_window = [(ts, load) for (ts, load) in self._mon.trace
-                     if self.open_ts is not None and ts >= self.open_ts]
-        self.dirty_samples = [[ts, load] for (ts, load) in in_window
-                              if load is None or load != (0.0, 0.0)]
+        in_window = [(ts, load) for (ts, load) in self._mon.trace if self.open_ts is not None and ts >= self.open_ts]
+        self.dirty_samples = [[ts, load] for (ts, load) in in_window if load is None or load != (0.0, 0.0)]
         self.clean = not self.dirty_samples
         return False
 
@@ -157,7 +163,7 @@ class CleanWindow:
             "open_ts": self.open_ts,
             "clean": self.clean,
             "n_in_window": (
-                sum(1 for ts, _ in self._mon.trace if ts >= self.open_ts)
-                if self.open_ts is not None else 0),
+                sum(1 for ts, _ in self._mon.trace if ts >= self.open_ts) if self.open_ts is not None else 0
+            ),
             "dirty_samples": self.dirty_samples,
         }
