@@ -26,7 +26,7 @@ Repository = "https://github.com/thor-arena/mjolnir.git"
 Issues = "https://github.com/thor-arena/mjolnir/issues"
 
 [project.optional-dependencies]
-plot = ["matplotlib>=3.8"]
+plot = ["matplotlib>=3.10.9"]
 dev = ["pytest>=8"]
 
 [project.scripts]
