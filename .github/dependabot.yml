@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # rolls the SHA-pinned actions in .github/workflows/*.yml
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  # uv.lock (Dependabot manages uv lockfiles via the pip ecosystem)
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
