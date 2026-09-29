@@ -1,0 +1,12 @@
+# Gates what ships: the src/ package (the wheel contents). The docker/
+# research scripts + CuTe-DSL kernel are deliberately out of scope (kernel
+# naming follows FA conventions, e.g. the running log-sum-exp accumulator).
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.14
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+        files: ^src/
+      - id: ruff-format
+        files: ^src/

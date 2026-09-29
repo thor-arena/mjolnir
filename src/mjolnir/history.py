@@ -20,6 +20,7 @@ One line per perf sweep repeat:
 The file is the raw, git-trackable substrate for the charts and for
 "progress over time" — every nightly bump / kernel change adds a row.
 """
+
 from __future__ import annotations
 
 import json
@@ -47,12 +48,17 @@ def load_records(history_file: Path) -> list[dict[str, Any]]:
     return out
 
 
-def make_record(s, gate_summary: dict | None, runs: int, warmup_runs: int,
-                exact_tg: bool, cells: list[dict[str, Any]],
-                raw_relpath: str) -> dict[str, Any]:
+def make_record(
+    s,
+    gate_summary: dict | None,
+    runs: int,
+    warmup_runs: int,
+    exact_tg: bool,
+    cells: list[dict[str, Any]],
+    raw_relpath: str,
+) -> dict[str, Any]:
     return {
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.gmtime())
-              .replace("+0000", "+00:00"),
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.gmtime()).replace("+0000", "+00:00"),
         "epoch": time.time(),
         "host": platform.node() or "unknown",
         "image": s.image,
@@ -74,6 +80,7 @@ def parse_benchy_json(raw: dict[str, Any]) -> list[dict[str, Any]]:
     from the per-run samples)."""
     cells = []
     for b in raw.get("benchmarks", []):
+
         def metric(name: str) -> dict | None:
             m = b.get(name)
             if not isinstance(m, dict):
@@ -91,10 +98,12 @@ def parse_benchy_json(raw: dict[str, Any]) -> list[dict[str, Any]]:
             "gen": b.get("response_size"),
             "prefill_phase": bool(b.get("is_context_prefill_phase", False)),
         }
-        for src, dst in (("tg_throughput", "tg_tps"),
-                         ("pp_throughput", "pp_tps"),
-                         ("peak_throughput", "peak_tps"),
-                         ("ttfr", "ttfr_ms")):
+        for src, dst in (
+            ("tg_throughput", "tg_tps"),
+            ("pp_throughput", "pp_tps"),
+            ("peak_throughput", "peak_tps"),
+            ("ttfr", "ttfr_ms"),
+        ):
             m = metric(src)
             if m is not None:
                 cell[dst] = m

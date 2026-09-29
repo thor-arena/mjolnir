@@ -3,6 +3,7 @@
 Used by ``mjolnir model`` / ``mjolnir image``: pick the active model
 config or the vLLM image with the arrow keys and Enter. Esc/q cancels.
 """
+
 from __future__ import annotations
 
 import curses
@@ -25,7 +26,7 @@ def _run(stdscr, choices: list[str], start: int, title: str) -> str:
         cols = curses.COLS
         lines = curses.LINES
         stdscr.addstr(0, 0, title[: cols - 1])
-        room = max(lines - 3, 1)          # title row + footer row
+        room = max(lines - 3, 1)  # title row + footer row
         top = max(0, min(cur - room + 1, len(choices) - room))
         for i in range(top, min(top + room, len(choices))):
             y = i - top + 1
@@ -52,8 +53,7 @@ def _run(stdscr, choices: list[str], start: int, title: str) -> str:
             raise Cancelled
 
 
-def select(title: str, choices: list[str],
-           default: str | None = None) -> str:
+def select(title: str, choices: list[str], default: str | None = None) -> str:
     """Arrow-key menu over ``choices``; returns the chosen item.
 
     Raises ``Cancelled`` on Esc/q or when the terminal can't run curses

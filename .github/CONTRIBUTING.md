@@ -80,6 +80,16 @@ and [`docs/thor-stack/base-bump-2026-09-26.md`](docs/thor-stack/base-bump-2026-0
   `~/.mjolnir-state.json` with precedence *CLI flag > state > `$MJOLNIR_*` >
   baked-in default*.
 
+## Pre-commit gate (one-time setup)
+
+`pre-commit install` — ruff (`check --fix` + `format`) runs on every commit
+over `src/` (the shippable package = the wheel contents). The docker research
+scripts and the CuTe-DSL kernel are deliberately out of scope: kernel naming
+follows FA conventions (e.g. the running log-sum-exp accumulator `l`). The
+hook version is pinned in `.pre-commit-config.yaml` — the CI in
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs the same checks on
+every PR, so the gate you see locally is the gate that blocks the release.
+
 ## Commit style
 
 Short, imperative, grouped by concern (see `git log`).

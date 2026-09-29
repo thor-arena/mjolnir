@@ -26,6 +26,7 @@ field on ``ReadmeContext``):
   ``st2_us``/``st2_bw``, ``st16_us``/``st16_bw``, ``gemv_us``, ``fi_us``,
   ``gemv_vs_fi``, ``cta1_us``, ``cta1_L``
 """
+
 from __future__ import annotations
 
 import json
@@ -35,8 +36,7 @@ from pathlib import Path
 
 import jinja2
 
-from mjolnir.config import (BASELINE_QUANT, DEFAULT_MODEL, DEFAULT_QUANT,
-                           RepoLayout)
+from mjolnir.config import BASELINE_QUANT, DEFAULT_MODEL, DEFAULT_QUANT, RepoLayout
 from mjolnir.history import load_records
 from mjolnir import theme
 
@@ -64,14 +64,14 @@ E2E_GREY_BAND = 3.0
 
 # ── formatting ──────────────────────────────────────────────────────────────
 
+
 def _thousands(v: float, dec: int) -> str:
     """``1304.912`` → ``'1 304.91'`` (space group separator, the README's
     typography)."""
     return f"{v:,.{dec}f}".replace(",", " ")
 
 
-def _delta(value: float, base: float, dec: int, higher_is_better: bool,
-           grey_band: float = 0.0) -> str:
+def _delta(value: float, base: float, dec: int, higher_is_better: bool, grey_band: float = 0.0) -> str:
     """A colored LaTeX delta against ``base``, e.g.
     ``$\\color{#16a34a}{\\text{+4.1\\%}}$`` (green) / red / grey (0% — or a
     non-zero delta inside ``grey_band``, i.e. within the measurement noise
@@ -106,6 +106,7 @@ def _load_json(path: Path):
 
 # ── raw data sources ────────────────────────────────────────────────────────
 
+
 def _find_ringfix(layout: RepoLayout) -> dict | None:
     """The GEMV SplitKV sweep raw (one clean window, L=8192 M=1)."""
     for cand in sorted(layout.raw_dir.glob("gemv-ring-fix-bench*.json")):
@@ -120,8 +121,7 @@ def _vllm_base_version(layout: RepoLayout) -> str:
     tag, else the stock baseline image in the bench history."""
     dockerfile = layout.repo_root / "docker" / "vllm-thor" / "Dockerfile"
     if dockerfile.exists():
-        m = re.search(r"vllm/vllm-openai:v(\d+\.\d+\.\d+)",
-                      dockerfile.read_text())
+        m = re.search(r"vllm/vllm-openai:v(\d+\.\d+\.\d+)", dockerfile.read_text())
         if m:
             return m.group(1)
     for r in load_records(layout.history_file):
@@ -161,8 +161,7 @@ def _load_multil(layout: RepoLayout) -> dict[str, dict[int, float]]:
         data = _load_json(cand)
         if not data:
             continue
-        mode = data.get("env", {}).get("mode") or \
-            cand.stem.replace("gemv-decode-bench-", "")
+        mode = data.get("env", {}).get("mode") or cand.stem.replace("gemv-decode-bench-", "")
         if mode not in _MULTIL_LABELS:
             continue
         slot: dict[int, float] = {}
@@ -196,12 +195,9 @@ def _e2e_latest(records: list[dict]) -> list[dict]:
         key = (r.get("image", ""), r.get("config", ""))
         if key not in latest or r.get("epoch", 0) > latest[key].get("epoch", 0):
             latest[key] = r
-    stock = [r for r in latest.values()
-             if _is_stock_image(r.get("image", ""))]
-    mj = [r for r in latest.values()
-          if not _is_stock_image(r.get("image", ""))]
-    mj.sort(key=lambda r: theme.image_first_order(
-        [r.get("backend", "")])[0])
+    stock = [r for r in latest.values() if _is_stock_image(r.get("image", ""))]
+    mj = [r for r in latest.values() if not _is_stock_image(r.get("image", ""))]
+    mj.sort(key=lambda r: theme.image_first_order([r.get("backend", "")])[0])
     return stock + mj
 
 
@@ -216,6 +212,7 @@ def _cell_mean(rec: dict, conc: int, ctx: int, metric: str) -> float | None:
 
 # ── table builders (pre-computed markdown, color math included) ────────────
 
+
 def _e2e_row_label(rec: dict, label_style: str = "full") -> str:
     cfg = rec.get("config", "")
     if _is_stock_image(rec.get("image", "")):
@@ -229,32 +226,32 @@ def _e2e_row_label(rec: dict, label_style: str = "full") -> str:
     return f"mjolnir, {cfg} ({desc})" if desc else f"mjolnir, {cfg}"
 
 
-def _e2e_table(rows: list[dict], metric: str, header_first: str,
-               value_fmt: str, delta_dec: int, higher_is_better: bool,
-               label_style: str = "full") -> str | None:
+def _e2e_table(
+    rows: list[dict],
+    metric: str,
+    header_first: str,
+    value_fmt: str,
+    delta_dec: int,
+    higher_is_better: bool,
+    label_style: str = "full",
+) -> str | None:
     """One e2e table (tg or pp): rows = the A/B legs, columns = context ×
     the selected concurrencies (c1, c4), in that order."""
-    concs = [c for c in E2E_CONCURRENCIES
-             if any(_cell_mean(r, c, 0, metric) is not None for r in rows)]
+    concs = [c for c in E2E_CONCURRENCIES if any(_cell_mean(r, c, 0, metric) is not None for r in rows)]
     ctxs: list[int] = []
     for r in rows:
         for c in r.get("cells", []):
             cc = c.get("concurrency")
             ctx = c.get("context") or 0
-            if cc in concs and (c.get(metric) or {}).get("mean") is not None \
-                    and ctx not in ctxs:
+            if cc in concs and (c.get(metric) or {}).get("mean") is not None and ctx not in ctxs:
                 ctxs.append(ctx)
     if not concs or not ctxs:
         return None
     ctxs.sort()
 
-    base = next((r for r in rows
-                 if _is_stock_image(r.get("image", ""))), rows[0])
+    base = next((r for r in rows if _is_stock_image(r.get("image", ""))), rows[0])
     lines = [
-        f"| {header_first} | " +
-        " | ".join(f"c{c} / {_ctx_label(ctx)}"
-                   for ctx in ctxs for c in concs)
-        + " |",
+        f"| {header_first} | " + " | ".join(f"c{c} / {_ctx_label(ctx)}" for ctx in ctxs for c in concs) + " |",
         "|" + "---|" * (1 + len(concs) * len(ctxs)),
     ]
     for r in rows:
@@ -270,24 +267,19 @@ def _e2e_table(rows: list[dict], metric: str, header_first: str,
                 if r is not base:
                     bv = _cell_mean(base, c, ctx, metric)
                     if bv:
-                        text += " " + _delta(v, bv, delta_dec,
-                                             higher_is_better,
-                                             grey_band=E2E_GREY_BAND)
+                        text += " " + _delta(v, bv, delta_dec, higher_is_better, grey_band=E2E_GREY_BAND)
                 cells.append(text)
         lines.append(f"| {label} | " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
 
-def _intro_table(rows: list[dict], rf: dict | None,
-                 multi: dict[str, dict[int, float]],
-                 kv_bits: str) -> str | None:
+def _intro_table(rows: list[dict], rf: dict | None, multi: dict[str, dict[int, float]], kv_bits: str) -> str | None:
     """The headline 3-leg table (stock FlashInfer / Mjolnir FlashInfer /
     Mjolnir GEMV): e2e tg + pp at the hero context, the L=hero decode
     kernel, the KV cache width."""
+
     def leg(config: str, stock: bool) -> dict | None:
-        cands = [r for r in rows
-                 if r.get("config") == config
-                 and _is_stock_image(r.get("image", "")) == stock]
+        cands = [r for r in rows if r.get("config") == config and _is_stock_image(r.get("image", "")) == stock]
         if not cands:
             return None
         return max(cands, key=lambda r: r.get("epoch", 0))
@@ -296,47 +288,44 @@ def _intro_table(rows: list[dict], rf: dict | None,
     mj_fi = leg(BASELINE_QUANT, False)
     mj_g = leg(DEFAULT_QUANT, False)
     if not (stock and mj_fi and mj_g):
-        print("[mjolnir] intro table needs all three A/B legs "
-              "(stock + both Mjolnir configs) — skipping")
+        print("[mjolnir] intro table needs all three A/B legs (stock + both Mjolnir configs) — skipping")
         return None
     if not rf:
-        print("[mjolnir] intro table needs the ring-fix kernel raw — "
-              "skipping")
+        print("[mjolnir] intro table needs the ring-fix kernel raw — skipping")
         return None
 
-    ctxs = sorted({c.get("context") or 0
-                   for r in (stock, mj_fi, mj_g)
-                   for c in r.get("cells", [])
-                   if _cell_mean(r, 1, c.get("context") or 0, "tg_tps")
-                   is not None})
+    ctxs = sorted(
+        {
+            c.get("context") or 0
+            for r in (stock, mj_fi, mj_g)
+            for c in r.get("cells", [])
+            if _cell_mean(r, 1, c.get("context") or 0, "tg_tps") is not None
+        }
+    )
     hero = max(ctxs)
     fi_med = rf["results"].get("flashinfer", {}).get("median")
-    gemv_med = rf["results"].get("st16_ns20", {}).get("median") or \
-        rf["results"].get("st16_auto", {}).get("median") or \
-        min((d["median"] for k, d in rf["results"].items()
-             if k.startswith("st16_")), default=None)
+    gemv_med = (
+        rf["results"].get("st16_ns20", {}).get("median")
+        or rf["results"].get("st16_auto", {}).get("median")
+        or min((d["median"] for k, d in rf["results"].items() if k.startswith("st16_")), default=None)
+    )
     cta1 = (multi.get("fa4_1cta") or {}).get(hero)
     if None in (fi_med, gemv_med, cta1):
-        print("[mjolnir] intro table needs the flashinfer + GEMV ns=20 "
-              "kernel rows and the FA4 1-CTA row — skipping")
+        print("[mjolnir] intro table needs the flashinfer + GEMV ns=20 kernel rows and the FA4 1-CTA row — skipping")
         return None
 
     def tsv(r, m):
         v = _cell_mean(r, 1, hero, m)
         return v
 
-    tg_s, tg_fi, tg_g = tsv(stock, "tg_tps"), tsv(mj_fi, "tg_tps"), \
-        tsv(mj_g, "tg_tps")
-    pp_s, pp_fi, pp_g = tsv(stock, "pp_tps"), tsv(mj_fi, "pp_tps"), \
-        tsv(mj_g, "pp_tps")
+    tg_s, tg_fi, tg_g = tsv(stock, "tg_tps"), tsv(mj_fi, "tg_tps"), tsv(mj_g, "tg_tps")
+    pp_s, pp_fi, pp_g = tsv(stock, "pp_tps"), tsv(mj_fi, "pp_tps"), tsv(mj_g, "pp_tps")
     if None in (tg_s, tg_fi, tg_g, pp_s, pp_fi, pp_g):
-        print(f"[mjolnir] intro table: no c=1 ctx={hero} tg/pp cells on all "
-              f"three legs — skipping")
+        print(f"[mjolnir] intro table: no c=1 ctx={hero} tg/pp cells on all three legs — skipping")
         return None
 
     lines = [
-        "| | stock vLLM FlashInfer | \u26a1 Mjolnir FlashInfer | "
-        "\u26a1 Mjolnir FlashAttention 4 GEMV |",
+        "| | stock vLLM FlashInfer | \u26a1 Mjolnir FlashInfer | \u26a1 Mjolnir FlashAttention 4 GEMV |",
         "|---|---|---|---|",
         f"| token generation (e2e, c=1, {hero // 1024}K ctx) | "
         f"{tg_s:.1f} t/s | "
@@ -384,8 +373,7 @@ def _sweep_table(rf: dict) -> str:
     rows.sort(key=lambda t: (-t[0], t[1], t[2]))
 
     lines = [
-        "| decode path | \u00b5s (median) | nominal KV BW (GB/s) | "
-        "\u0394 vs FlashInfer |",
+        "| decode path | \u00b5s (median) | nominal KV BW (GB/s) | \u0394 vs FlashInfer |",
         "|---|---:|---:|---:|",
         f"| FlashInfer FA2-tc, e4m3 KV \u2014 production baseline | "
         f"{_thousands(fi, 2)} | {res['flashinfer'].get('bw_gbs_nominal_kv', 0):.2f} | "
@@ -395,7 +383,8 @@ def _sweep_table(rf: dict) -> str:
         lines.append(
             f"| {label(key)} | {_thousands(d['median'], 2)} | "
             f"{d.get('bw_gbs_nominal_kv', 0):.2f} | "
-            f"{_delta(d['median'], fi, 1, False)} |")
+            f"{_delta(d['median'], fi, 1, False)} |"
+        )
     return "\n".join(lines)
 
 
@@ -415,12 +404,14 @@ def _multil_table(multi: dict[str, dict[int, float]]) -> str | None:
         pts = multi[m]
         lines.append(
             f"| {_MULTIL_LABELS.get(m, m)} | "
-            + " | ".join(f"{pts.get(L, float('nan')):.2f}" if L in pts
-                         else "—" for L in Ls) + " |")
+            + " | ".join(f"{pts.get(L, float('nan')):.2f}" if L in pts else "—" for L in Ls)
+            + " |"
+        )
     return "\n".join(lines)
 
 
 # ── context ─────────────────────────────────────────────────────────────────
+
 
 @dataclass
 class ReadmeContext:
@@ -475,16 +466,11 @@ def collect_context(layout: RepoLayout) -> ReadmeContext:
     rf = _find_ringfix(layout)
     multi = _load_multil(layout)
 
-    ctx = ReadmeContext(vllm_version=_vllm_base_version(layout),
-                        model=DEFAULT_MODEL)
+    ctx = ReadmeContext(vllm_version=_vllm_base_version(layout), model=DEFAULT_MODEL)
 
     if rows:
-        ctx.table_e2e_tg = _e2e_table(rows, "tg_tps",
-                                      "backend (image, config)",
-                                      "{:.2f}", 1, True)
-        ctx.table_e2e_pp = _e2e_table(rows, "pp_tps", "backend",
-                                      "{:.0f}", 1, True,
-                                      label_style="short")
+        ctx.table_e2e_tg = _e2e_table(rows, "tg_tps", "backend (image, config)", "{:.2f}", 1, True)
+        ctx.table_e2e_pp = _e2e_table(rows, "pp_tps", "backend", "{:.0f}", 1, True, label_style="short")
         if rf:
             ctx.table_intro = _intro_table(rows, rf, multi, ctx.kv_bits)
 
@@ -544,15 +530,14 @@ def collect_context(layout: RepoLayout) -> ReadmeContext:
     return ctx
 
 
-def render_readme(layout: RepoLayout, template: Path | None = None,
-                  out: Path | None = None) -> Path:
+def render_readme(layout: RepoLayout, template: Path | None = None, out: Path | None = None) -> Path:
     """Render README.md from the Jinja2 template (repo root by default)."""
     tpl = Path(template) if template else layout.repo_root / "README.md.j2"
     dest = Path(out) if out else layout.repo_root / "README.md"
     if not tpl.exists():
         raise FileNotFoundError(
-            f"README template not found: {tpl} "
-            "(git-managed — restore it or pass --readme-template)")
+            f"README template not found: {tpl} (git-managed — restore it or pass --readme-template)"
+        )
     ctx = collect_context(layout)
     env = jinja2.Environment(
         undefined=jinja2.StrictUndefined,
