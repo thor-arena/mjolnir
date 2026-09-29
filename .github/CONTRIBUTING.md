@@ -87,4 +87,4 @@ Short, imperative, grouped by concern (see `git log`).
 ## License
 
 By contributing, you agree that your contributions are made under the
-[Apache-2.0](LICENSE) license.
+[MIT](LICENSE) license.

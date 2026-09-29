@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Mjolnir — vLLM on Jetson Thor (sm_110): a patched vLLM image, an FA4-native GEMV decode kernel, and a one-command serve / bench / verify CLI."
 readme = "README.md"
 requires-python = ">=3.10"
-license = "Apache-2.0"
+license = "MIT"
 authors = [{ name = "Narandill" }]
 keywords = ["vllm", "jetson", "thor", "fa4", "flash-attention", "gemv", "cuda", "sm110"]
 dependencies = [

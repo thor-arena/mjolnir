@@ -7,12 +7,11 @@
   <img src="https://img.shields.io/badge/Jetson-AGX%20Thor-76b900" alt="NVIDIA Jetson AGX Thor">
   <img src="https://img.shields.io/badge/vLLM-0.30.0-black" alt="vLLM 0.30.0">
   <img src="https://img.shields.io/badge/FA4-GEMV%20decode%20kernel-orange" alt="FA4 GEMV decode kernel">
-  <img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="Apache-2.0">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT">
 </p>
 
 <p align="center">
-  <b><em>Mjölnir</em></b> <sup>(MYOL-nir)</sup>
-   — <em>serve LLM models on a <b>Jetson AGX Thor</b> with a decode kernel built for exactly that hardware.</em>
+  <b><em>Mjölnir</em></b> <sup>(MYOL-nir)</sup> — <em>serve LLM models on a <b>Jetson AGX Thor</b> with a decode kernel built for exactly that hardware.</em>
 </p>
 
 <p align="center">
@@ -105,19 +104,22 @@ Kernel code sits in the `sm100_hd256_decode_gemv.py` (CuTe-DSL): a pure-FMA GEMV
 
 ## The CLI
 
-| command | what it does |
-|---|---|
-| `mjolnir` | help + next-steps guide |
-| `mjolnir serve up\|down\|status\|logs` | drive the vLLM container |
-| `mjolnir model [use\|list]` | active model/config (bare = picker over repo `configs/` + user-local `~/.local/share/mjolnir/configs/`) |
-| `mjolnir image [use\|list\|build\|gates]` | active image (bare = picker) / build the patch stack / run the canary gates |
-| `mjolnir bench perf` | gated e2e throughput sweep → raw JSON → history → charts |
-| `mjolnir bench ab` | headline A/B (restarts the server per leg — schedule it) |
-| `mjolnir bench kernel <task>` | gated kernel benches (`--help-list`; `--dry-run` previews) |
-| `mjolnir verify` | GEMV kernel correctness suites (gated, vs fp32 reference) |
-| `mjolnir gate` | the clean-window gate (`--once` = check now) |
-| `mjolnir vfa prepare` | build the GEMV'd `vllm_flash_attn` tree (kernel iteration) |
-| `mjolnir plot` / `mjolnir history` | render the README charts (+ `README.md` from the template with `--readme`) / browse the bench log |
+
+
+```bash
+mjolnir                               # Help and next-steps guide
+mjolnir serve [up|down|status|logs]   # Manage the vLLM container
+mjolnir model [use|list]              # Select/list model configs (repo + user-local)
+mjolnir image [use|list|build|gates]  # Select images, build patch stack, run canary gates
+mjolnir bench perf                    # Gated e2e throughput sweep → JSON, history, charts
+mjolnir bench ab                      # Headline A/B benchmark (restarts server per leg)
+mjolnir bench kernel <task>           # Gated kernel benches (--help-list, --dry-run)
+mjolnir verify                        # GEMV correctness suites vs FP32 reference
+mjolnir gate                          # Clean-window gate (--once to check now)
+mjolnir vfa prepare                   # Build GEMV-patched vllm_flash_attn tree
+mjolnir plot                          # Render charts and README.md (--readme)
+mjolnir history                       # Browse benchmark history
+```
 
 > [!TIP] 
 > - Selections persist to `~/.mjolnir-state.json`; precedence: CLI flag > state
@@ -129,7 +131,9 @@ then `grep -E '"(median|p95|bw_gbs_nominal_kv|clean)"' /p/r.json`.
 
 All numbers from committed raw artifacts in [`benchmarks/`](benchmarks/). Kernel tables: **one gated window** each — except the multi-L session, where each kernel runs in its own window (marked). Wall-clock deltas are only meaningful within a window ([methodology](docs/methodology/benchmarking.md)).
 
-<img src="assets/benchmarks/vllm-vs-mjolnir-image.png" width="100%">
+<p align="center">
+  <img src="assets/benchmarks/vllm-vs-mjolnir-image.png" width="100%">
+</p>
 
 ### Mjolnir Kernel
 
@@ -139,7 +143,9 @@ M=1 decode, GQA 24:4, quantized KV + descales
 
 **GEMV SplitKV sweep**
 
-<img src="assets/benchmarks/kernel-microbench.png">
+<p align="center">
+  <img src="assets/benchmarks/kernel-microbench.png">
+</p>
 
 > (300 iters; the nominal KV-BW column is the raw's own `kv_bytes ÷ wall-clock`):
 
@@ -157,7 +163,9 @@ M=1 decode, GQA 24:4, quantized KV + descales
 
 **Multi-L session**
 
-<img src="assets/benchmarks/kernel-length.png" width="100%">
+<p align="center">
+  <img src="assets/benchmarks/kernel-length.png" width="100%">
+</p>
 
 | kernel | L=2048 | L=4096 | L=8192 |
 |---|---:|---:|---:|
@@ -175,7 +183,9 @@ M=1 decode, GQA 24:4, quantized KV + descales
 
 **Token-generation t/s**:
 
-<img src="assets/benchmarks/tg-variability.png" width="100%">
+<p align="center">
+  <img src="assets/benchmarks/tg-variability.png" width="100%">
+</p>
 
 | backend (image, config) | c1 / no ctx | c4 / no ctx | c1 / 4K ctx | c4 / 4K ctx | c1 / 8K ctx | c4 / 8K ctx |
 |---|---|---|---|---|---|---|
@@ -188,7 +198,9 @@ M=1 decode, GQA 24:4, quantized KV + descales
 
 **Prompt-processing t/s**:
 
-<img src="assets/benchmarks/ttfr-by-context.png" width="100%">
+<p align="center">
+  <img src="assets/benchmarks/ttfr-by-context.png" width="100%">
+</p>
 
 | backend | c1 / no ctx | c4 / no ctx | c1 / 4K ctx | c4 / 4K ctx | c1 / 8K ctx | c4 / 8K ctx |
 |---|---|---|---|---|---|---|
@@ -289,6 +301,6 @@ See [SECURITY.md](SECURITY.md) — in particular, the served API is unauthentica
 
 ## License
 
-[Apache-2.0](LICENSE)
+[MIT](LICENSE)
 
-<p align="center"><sub>⚡ Mjölnir — created with 100% ❤️ Edge AI</sub></p>
+<p align="center"><sub>⚡ Mjölnir — built with ❤️, powered 100% by Edge AI. Zero cloud.</sub></p>
