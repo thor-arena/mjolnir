@@ -97,7 +97,8 @@ def _rows():
 
 
 def test_best_k_table_findings_chart():
-    from mjolnir_cli import charts, theme
+    from mjolnir_cli import theme
+    from mjolnir_cli.charts.kernel import chart_spec
     from mjolnir_cli.readme.findings import findings
     from mjolnir_cli.readme.tables import TABLES
 
@@ -110,7 +111,7 @@ def test_best_k_table_findings_chart():
     found = findings("spec", doc)
     assert any("best with **3 drafts**" in f for f in found)
     assert any("Acceptance, 3 drafts" in f for f in found)
-    assert charts.chart_spec({"spec": doc}, theme.DARK) is not None
+    assert chart_spec({"spec": doc}, theme.DARK) is not None
 
 
 def test_spec_delta_keeps_raw_position_counts():

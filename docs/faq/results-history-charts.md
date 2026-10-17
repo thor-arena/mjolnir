@@ -11,7 +11,7 @@ runs, and how do the charts get updated?"
 | **server log** | `benchmarks/raw/perf-<ts>/vllm-server.log` | the vLLM container's whole log (startup kernel dispatch + the bench window) — the kernel-debugging artifact. |
 | **history** | `benchmarks/history.jsonl` | append-only log: **one line per gated run** (ts, image, model, config, backend, gate summary, per-cell `tg_tps`/`pp_tps` mean/std/values, raw path). The substrate for every chart. |
 | **kernel raw** | `benchmarks/raw/verify/<stage>/<run_id>.json` | one file per `mjolnir verify` run (schema `mjolnir.verify/1`): commit, image, parameters, every leg's per-L numbers; `"default": true` marks headline runs. See [verify-kernel.md](verify-kernel.md). |
-| **charts** | `assets/benchmarks/*.png` (+ `-dark.png`) | rendered from the raw data by `mjolnir plot` — always via `charts.py` + the `theme.py` design system: one color per backend everywhere (Mjolnir orange, FlashInfer blue, FA2 aqua), light and dark variants, `manifest.json` listing what was rendered from which run. |
+| **charts** | `assets/benchmarks/*.png` (+ `-dark.png`) | rendered from the raw data by `mjolnir plot` — always via the `charts/` package + the `theme.py` design system: one color per backend everywhere (Mjolnir orange, FlashInfer blue, FA2 aqua), light and dark variants, `manifest.json` listing what was rendered from which run. |
 
 ## Compare runs
 

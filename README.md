@@ -356,7 +356,7 @@ Every command, sub-command and option, with defaults: **[the CLI reference](docs
 │   ├── mjolnir/                the kernel package (PyPI: mjolnir-kernel, import `mjolnir`)
 │   │   └── mjolnir/            t5_decode.py (kernel + harness) · runner.py · backend.py
 │   └── mjolnir-cli/            the CLI package (PyPI: mjolnir-cli, command `mjolnir`)
-│       └── mjolnir_cli/        verify/ · charts.py · readme/ · autoresearch.py · serve/bench/...
+│       └── mjolnir_cli/        verify/ · charts/ · readme/ · autoresearch.py · serve/bench/...
 ├── docker/vllm-thor/           the image: Dockerfile, patches/, apply/verify gates, PATCHES.md
 ├── configs/                    model configs (NVFP4_MJOLNIR_E2M3_LMH8_VT64K default, NVFP4 = FlashInfer, NVFP4_FA2)
 ├── benchmarks/raw/verify/      raw verify results (one JSON per stage run) — the charts' only input

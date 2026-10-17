@@ -4,12 +4,17 @@ Read straight from the source with ``ast`` (every import counts, function-local
 ones included; only ``if TYPE_CHECKING:`` blocks are skipped, since a type-only
 import never runs):
 
-* the ``readme`` package is layered as ``ALLOWED`` declares (fmt <- tables /
-  findings <- context / how <- ``__init__``);
+* the ``readme`` and ``charts`` packages are layered as ``ALLOWED`` declares,
+  and hold exactly the modules it declares: readme is fmt <- tables / findings
+  <- context / how <- ``__init__``; charts is ``_common`` <- one module per
+  chart family (kernel, e2e, hero, infographic, accuracy, autoresearch) <-
+  ``__init__``, so a family imports only ``_common`` from ``charts`` and only
+  ``__init__`` crosses families;
+* modules outside a ``FACADES`` package reach it only through its facade;
 * ``FORBIDDEN`` lists the packages that must not import each other: nothing in
   ``readme`` reaches up to ``charts``, ``cli`` or ``clidoc``, and ``charts``
   never imports ``readme`` (the labels both need live in ``mjolnir_cli.labels``,
-  the verify data loader in ``verify.latest``);
+  the verify data loader in ``verify.latest``), ``cli`` or ``clidoc``;
 * a name with a leading underscore stays inside its module: governed modules
   import none from elsewhere, and nobody imports one from a governed module.
 """
@@ -25,11 +30,12 @@ import pytest
 SRC = Path(__file__).resolve().parents[2] / "src" / "mjolnir-cli"
 PKG = "mjolnir_cli"
 README = "mjolnir_cli.readme"
+CHARTS = "mjolnir_cli.charts"
 
 # Modules whose private names must not cross a module boundary, in either
-# direction. Later PRs of the file-length split (#33) extend this set as they
-# give charts and commands the same treatment.
-GOVERNED = {"mjolnir_cli.readme", "mjolnir_cli.labels", "mjolnir_cli.verify.latest"}
+# direction. The file-length split (#33) adds each package here as it is
+# split: readme and charts so far; the cli commands come next.
+GOVERNED = {"mjolnir_cli.readme", "mjolnir_cli.labels", "mjolnir_cli.verify.latest", CHARTS}
 
 
 @dataclass(frozen=True)
@@ -116,22 +122,34 @@ def _in(module: str, root: str) -> bool:
 
 
 FMT, TABLES, FINDINGS = f"{README}.fmt", f"{README}.tables", f"{README}.findings"
+CHARTS_COMMON = f"{CHARTS}._common"
+CHART_FAMILIES = ("kernel", "e2e", "hero", "infographic", "accuracy", "autoresearch")
 
-# readme module -> the other readme modules it may import (the layering)
+# The layered packages: each one's ``__init__`` may import any of its modules.
+LAYERED = (README, CHARTS)
+
+# module of a layered package -> the other modules of that package it may import
 ALLOWED = {
     FMT: set(),
     TABLES: {FMT},
     FINDINGS: {FMT},
     f"{README}.context": {FMT, TABLES, FINDINGS},
     f"{README}.how": {FMT, TABLES, FINDINGS},
+    CHARTS_COMMON: set(),
+    **{f"{CHARTS}.{family}": {CHARTS_COMMON} for family in CHART_FAMILIES},
 }
+
+# packages that modules outside them may import only through their facade
+FACADES = (CHARTS,)
 
 # importer package -> the mjolnir_cli packages nothing in it may import
 FORBIDDEN = [
-    (README, "mjolnir_cli.charts"),
+    (README, CHARTS),
     (README, "mjolnir_cli.cli"),
     (README, "mjolnir_cli.clidoc"),
-    ("mjolnir_cli.charts", README),
+    (CHARTS, README),
+    (CHARTS, "mjolnir_cli.cli"),
+    (CHARTS, "mjolnir_cli.clidoc"),
 ]
 
 
@@ -147,11 +165,33 @@ def test_walker_sees_function_local_and_attribute_uses_but_not_type_checking_blo
     assert found == {("mjolnir_cli.charts", None), ("mjolnir_cli.charts", "_x"), ("mjolnir_cli.readme.fmt", "_y")}
 
 
+def _package(module: str) -> str:
+    return next(p for p in LAYERED if _in(module, p))
+
+
+@pytest.mark.parametrize("package", LAYERED)
+def test_layered_package_holds_exactly_its_declared_modules(graph, package):
+    assert {m for m in graph if _in(m, package)} == {package, *(m for m in ALLOWED if _package(m) == package)}
+
+
 @pytest.mark.parametrize("module", sorted(ALLOWED))
-def test_readme_module_imports_only_the_readme_layers_below_it(graph, module):
-    assert module in graph, f"{module} is missing — the readme package layout changed"
-    deps = {u.target for u in graph[module] if _in(u.target, README) and u.target != module}
+def test_layered_module_imports_only_its_allowed_package_modules(graph, module):
+    package = _package(module)
+    assert module in graph, f"{module} is missing — the {package} package layout changed"
+    deps = {u.target for u in graph[module] if _in(u.target, package) and u.target != module}
     assert deps <= ALLOWED[module]
+
+
+@pytest.mark.parametrize("package", FACADES)
+def test_modules_outside_a_facade_package_reach_it_only_through_its_facade(graph, package):
+    bad = [
+        (m, u.target, u.line)
+        for m in graph
+        if not _in(m, package)
+        for u in graph[m]
+        if _in(u.target, package) and u.target != package
+    ]
+    assert bad == []
 
 
 @pytest.mark.parametrize(("importer", "target"), FORBIDDEN)

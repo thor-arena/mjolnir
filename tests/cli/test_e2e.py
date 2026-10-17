@@ -265,7 +265,7 @@ def test_pair_and_site_rows_never_mix_models(tmp_path):
     on the interactive site."""
     from types import SimpleNamespace
 
-    from mjolnir_cli import charts
+    from mjolnir_cli.charts.e2e import e2e_rows
 
     h = tmp_path / "history.jsonl"
     q36 = {"model": "nvidia/Qwen3.6-35B-A3B"}
@@ -280,7 +280,7 @@ def test_pair_and_site_rows_never_mix_models(tmp_path):
     assert off["epoch"] == 1 and mj["epoch"] == 2  # the default model's runs only
     off, mj = e2e.latest_pair(h, "NVFP4_MJOLNIR_E2M3", model="nvidia/Qwen3.6-35B-A3B")
     assert off["epoch"] == 3 and mj["epoch"] == 4
-    site = charts.e2e_rows(SimpleNamespace(history_file=h))
+    site = e2e_rows(SimpleNamespace(history_file=h))
     assert {k: v["epoch"] for k, v in site.items()} == {"NVFP4": 1, "NVFP4_MJOLNIR_E2M3": 2}
 
 

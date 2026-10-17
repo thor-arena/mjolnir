@@ -88,12 +88,13 @@ def test_docs_table_and_findings():
 
 
 def test_chart_renders():
-    from mjolnir_cli import charts, theme
+    from mjolnir_cli import theme
+    from mjolnir_cli.charts.kernel import chart_kvcache
 
     doc = _doc([_row("official", "NVFP4", "fp8", 2000000), _row("mjolnir", "NVFP4_MJOLNIR", "fp8", 1990000)])
-    fig = charts.chart_kvcache({"kv-cache-size": doc}, theme.LIGHT)
+    fig = chart_kvcache({"kv-cache-size": doc}, theme.LIGHT)
     assert fig is not None
-    assert charts.chart_kvcache({}, theme.LIGHT) is None
+    assert chart_kvcache({}, theme.LIGHT) is None
 
 
 def test_spec_delta():

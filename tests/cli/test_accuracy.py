@@ -337,7 +337,9 @@ def test_accuracy_page_pending_without_runs(repo):
 
 
 def test_infographic_multiple():
-    assert charts.multiple(200) == "3×" and charts.multiple(150) == "2.5×" and charts.multiple(100.4) == "2×"
+    from mjolnir_cli.charts.infographic import multiple
+
+    assert multiple(200) == "3×" and multiple(150) == "2.5×" and multiple(100.4) == "2×"
 
 
 def test_container_output_is_handed_to_the_host_user(monkeypatch):

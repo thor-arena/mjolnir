@@ -361,13 +361,13 @@ def _render_progress(root: Path, rows: list[dict] | None = None, out: Path | Non
     try:
         from mjolnir_cli import charts, theme
 
-        plt = charts._plt()
+        plt = charts.pyplot()
         out = out or root / PROGRESS
         for mode in theme.MODES:
             fig = charts.chart_autoresearch(rows, mode)
             if fig is None:
                 return None
-            charts._save(fig, out.with_name(f"{out.stem}{mode.suffix}{out.suffix}"))
+            charts.save_png(fig, out.with_name(f"{out.stem}{mode.suffix}{out.suffix}"))
             plt.close(fig)
         return out
     except Exception as e:  # noqa: BLE001 — a chart must never cost a ledger row

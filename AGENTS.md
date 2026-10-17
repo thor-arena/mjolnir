@@ -154,7 +154,12 @@ skipped with a hint — nothing blocks on a password.
     the latest headline run per stage), `report.py`, `cli.py`.
   - `drivers/` — the FlashInfer (NHD/HND) and FA2 benchmark drivers run in the
     image.
-  - `charts.py` + `theme.py` (every chart; the design system), `labels.py`
+  - `charts/` + `theme.py` (every chart; the design system). `charts/` is
+    one module per chart family — `kernel.py` (verify stages), `e2e.py`
+    (bench history), `hero.py` (README hero), `infographic.py` (opening
+    infographic), `accuracy.py`, `autoresearch.py` — on a shared
+    `_common.py` (lazy `pyplot`, `save_png`, fonts); `__init__.py` holds
+    `render_all` and the API other modules use. `labels.py`
     (config labels both charts and docs use), `readme/` (README/docs
     rendering: `__init__.py` renders and `chart()`, `fmt.py` formatting,
     `tables.py` tables, `findings.py` findings, `context.py` the template
@@ -212,9 +217,11 @@ Default L for every stage and chart: **128 4096 8192 16384 32768 65536 131072
 uv run mjolnir plot --readme              # charts + README.md + docs/kernel/*.md
 uv run mjolnir plot --site _site          # the interactive page (pages.yml publishes it)
 ```
-New chart → a function in `charts.py` using `theme.py` (series colors: Mjolnir
-orange, FlashInfer blue, FA2 aqua — never ad-hoc colors; light + dark variants),
-registered in `render_all`; new table → `readme/tables.py` `TABLES`; reference both from
+New chart → a function in its family module under `charts/` using `theme.py`
+(series colors: Mjolnir orange, FlashInfer blue, FA2 aqua — never ad-hoc
+colors; light + dark variants), registered in that module's `*_CHARTS` table,
+which `render_all` walks (a family imports only `charts/_common.py`, never
+another family; `tests/cli/test_module_boundaries.py` pins it); new table → `readme/tables.py` `TABLES`; reference both from
 the template. Sentences that state a result come from `readme/findings.py`,
 not hand-typed numbers.
 

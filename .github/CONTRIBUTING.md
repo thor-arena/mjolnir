@@ -19,7 +19,7 @@ so **a contribution can be as small as one benchmark run from your Thor**.
    `mjolnir.verify/1` JSON in [`benchmarks/raw/verify/`](../benchmarks/raw/verify/);
    end-to-end rows go to [`benchmarks/history.jsonl`](../benchmarks/history.jsonl).
    Charts are rendered only by
-   [`charts.py`](../src/mjolnir-cli/mjolnir_cli/charts.py) with the
+   [`charts/`](../src/mjolnir-cli/mjolnir_cli/charts/) with the
    [`theme.py`](../src/mjolnir-cli/mjolnir_cli/theme.py) design system, and the
    README / kernel chapters only from their `.md.j2` templates — CI fails if
    `README.md` doesn't reproduce from the committed data. No prose-only results.
