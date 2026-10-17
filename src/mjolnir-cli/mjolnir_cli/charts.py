@@ -24,8 +24,10 @@ from typing import Callable
 from mjolnir_cli import theme
 from mjolnir_cli.config import DEFAULT_MODEL, RepoLayout, model_of, model_short
 from mjolnir_cli.history import load_records
+from mjolnir_cli.labels import kvcache_label, spec_label
 from mjolnir_cli.theme import Mode
 from mjolnir_cli.verify import results
+from mjolnir_cli.verify.latest import load_verify
 from mjolnir_cli.verify.stages import NOISE_PCT
 
 PEAK_GBS = 273.0  # Jetson AGX Thor LPDDR5X theoretical peak
@@ -34,18 +36,6 @@ DPI = 160
 
 
 # ── data ────────────────────────────────────────────────────────────────────
-
-
-def load_verify(layout: RepoLayout) -> dict[str, dict]:
-    """The latest default run of every stage that has one."""
-    from mjolnir_cli.verify.stages import STAGES
-
-    out = {}
-    for name in STAGES:
-        doc = results.latest(layout.verify_dir, name)
-        if doc:
-            out[name] = doc
-    return out
 
 
 def L_label(L: int) -> str:
@@ -1115,8 +1105,6 @@ def _kvcache_series(r: dict) -> str:
 def chart_kvcache(data: dict, mode: Mode):
     """KV capacity per config: tokens (left) and the concurrent e2e-shaped
     requests (context + 2048 prompt + 128 generated) they fit (right)."""
-    from mjolnir_cli.readme import kvcache_label
-
     doc = data.get("kv-cache-size")
     rows = [r for r in (doc or {}).get("rows", []) if r.get("kv_tokens")]
     if not rows:
@@ -1185,8 +1173,6 @@ def chart_kvcache(data: dict, mode: Mode):
 def chart_spec(data: dict, mode: Mode):
     """Decode t/s per request vs draft count (one panel per concurrency) and
     per-position acceptance at the largest draft count."""
-    from mjolnir_cli.readme import spec_label
-
     doc = data.get("spec")
     rows = [r for r in (doc or {}).get("rows", []) if r.get("decode_tps")]
     if not rows:

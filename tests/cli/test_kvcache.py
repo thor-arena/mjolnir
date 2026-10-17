@@ -72,7 +72,8 @@ def test_fits_and_legs():
 
 
 def test_docs_table_and_findings():
-    from mjolnir_cli import readme
+    from mjolnir_cli.readme.findings import findings
+    from mjolnir_cli.readme.tables import TABLES
 
     doc = _doc(
         [
@@ -80,9 +81,9 @@ def test_docs_table_and_findings():
             _row("mjolnir", "NVFP4_MJOLNIR_E2M3", "fp6_e2m3", 2656033),
         ]
     )
-    table = readme.TABLES["kv-cache-size"](doc)
+    table = TABLES["kv-cache-size"](doc)
     assert "2,656,033" in table and "1.33×" in table and "| 76 |" in table
-    found = readme._findings("kv-cache-size", doc)
+    found = findings("kv-cache-size", doc)
     assert any("+33%" in f for f in found)
 
 

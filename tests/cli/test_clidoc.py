@@ -47,3 +47,9 @@ mjolnir verify <stage>                # w
 
 def test_rst_conversion():
     assert clidoc._rst("``a <b>`` and <c>") == "`a <b>` and &lt;c&gt;"
+
+
+def test_write_reference_writes_exactly_the_reference_to_docs_cli_md(tmp_path):
+    path = clidoc.write_reference(tmp_path, app)
+    assert path == tmp_path / "docs" / "cli.md"
+    assert path.read_text() == clidoc.reference(app)

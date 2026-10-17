@@ -33,7 +33,8 @@ def _slim(doc: dict) -> dict:
 
 
 def build(layout: RepoLayout, out_dir: Path, data: dict | None = None) -> Path:
-    from mjolnir_cli.charts import e2e_rows, load_verify
+    from mjolnir_cli.charts import e2e_rows
+    from mjolnir_cli.verify.latest import load_verify
     from mjolnir_cli.verify.stages import STAGES
 
     data = data if data is not None else load_verify(layout)

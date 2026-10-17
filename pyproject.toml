@@ -68,8 +68,7 @@ exempt = [
 
 [tool.mjolnir.file-length.grandfathered]
 "src/mjolnir/mjolnir/t5_decode.py" = 2990
-"src/mjolnir-cli/mjolnir_cli/charts.py" = 1714
+"src/mjolnir-cli/mjolnir_cli/charts.py" = 1700
 "src/mjolnir-cli/mjolnir_cli/cli.py" = 1482
 "scripts/hw/setup-thor.sh" = 1287
-"src/mjolnir-cli/mjolnir_cli/readme.py" = 1064
 "tests/kernel/test_runner.py" = 1081

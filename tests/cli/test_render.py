@@ -88,6 +88,13 @@ def test_render_without_verify_data_is_pending(repo):
     assert "Pending — run `mjolnir verify ring`" in (repo / "docs" / "kernel" / "ring.md").read_text()
 
 
+def test_render_readme_renders_templates_only_and_leaves_docs_cli_md_alone(repo):
+    layout = load_layout()
+    written = readme.render_readme(layout)
+    assert repo / "docs" / "cli.md" not in written
+    assert not (repo / "docs" / "cli.md").exists()
+
+
 def test_render_is_idempotent(repo):
     layout = load_layout()
     write_all(layout.verify_dir)

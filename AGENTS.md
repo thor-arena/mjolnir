@@ -150,12 +150,17 @@ skipped with a hint — nothing blocks on a password.
   - `verify/` — `mjolnir verify`: `stages.py` (every stage, `ALL_LS`, the
     correctness matrix), `legs.py` (Mjolnir / FlashInfer / FA2 legs and ncu
     filters), `docker.py` (one container per leg), `ncu.py` (summary parsing),
-    `results.py` (the `mjolnir.verify/1` schema), `report.py`, `cli.py`.
+    `results.py` (the `mjolnir.verify/1` schema), `latest.py` (`load_verify`:
+    the latest headline run per stage), `report.py`, `cli.py`.
   - `drivers/` — the FlashInfer (NHD/HND) and FA2 benchmark drivers run in the
     image.
-  - `charts.py` + `theme.py` (every chart; the design system), `readme.py`
-    (README/docs rendering: tables, findings, `chart()`), `interactive.py`
-    (the Plotly site), `autoresearch.py`.
+  - `charts.py` + `theme.py` (every chart; the design system), `labels.py`
+    (config labels both charts and docs use), `readme/` (README/docs
+    rendering: `__init__.py` renders and `chart()`, `fmt.py` formatting,
+    `tables.py` tables, `findings.py` findings, `context.py` the template
+    context, `how.py` the formula panels; layering pinned by
+    `tests/cli/test_module_boundaries.py`), `interactive.py` (the Plotly
+    site), `autoresearch.py`.
   - `hatch_build.py` bundles `configs/`, `docker/litellm`, `docker/perses`,
     `scripts/hw` into the wheel so the CLI works outside a checkout.
 - `tests/cli/` (pytest, runs in CI) and `tests/kernel/` (needs CUDA + CUTLASS
@@ -209,8 +214,8 @@ uv run mjolnir plot --site _site          # the interactive page (pages.yml publ
 ```
 New chart → a function in `charts.py` using `theme.py` (series colors: Mjolnir
 orange, FlashInfer blue, FA2 aqua — never ad-hoc colors; light + dark variants),
-registered in `render_all`; new table → `readme.py` `TABLES`; reference both from
-the template. Sentences that state a result come from `readme.py` findings,
+registered in `render_all`; new table → `readme/tables.py` `TABLES`; reference both from
+the template. Sentences that state a result come from `readme/findings.py`,
 not hand-typed numbers.
 
 ### End to end
@@ -389,7 +394,7 @@ Plan (as probe-gated patches, same pattern as the shipped ones):
   reduction, never the reciprocal speedup); × is a ratio of times (kernel:
   reference ÷ Mjolnir) or of throughputs (≥ +100% on the infographic). Every
   table / figure with % or × gets a `{{ how("<kind>") }}` panel
-  (`readme.py` `_HOW`) that states the formula.
+  (`readme/how.py` `_HOW`) that states the formula.
 - **Lint:** `uvx ruff@0.14.14 check src/ tests/` + `format` (pre-commit runs it).
 - **Container output:** containers run as root; a file one writes into a host
   mount (the checkout) is handed back with `build_run_args(..., chown=...)` /

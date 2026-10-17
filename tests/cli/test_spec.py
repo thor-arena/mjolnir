@@ -97,15 +97,17 @@ def _rows():
 
 
 def test_best_k_table_findings_chart():
-    from mjolnir_cli import charts, readme, theme
+    from mjolnir_cli import charts, theme
+    from mjolnir_cli.readme.findings import findings
+    from mjolnir_cli.readme.tables import TABLES
 
     rows = _rows()
     best = spec.best_k(rows)
     assert best[("NVFP4", 1)]["k"] == 3 and best[("NVFP4_MJOLNIR_E2M3", 1)]["k"] == 3
     doc = {"stage": "spec", "run_id": "20990101-000000", "rows": rows, "params": {}}
-    table = readme.TABLES["spec"](doc)
+    table = TABLES["spec"](doc)
     assert "accept @4" in table and "**★**" in table
-    found = readme._findings("spec", doc)
+    found = findings("spec", doc)
     assert any("best with **3 drafts**" in f for f in found)
     assert any("Acceptance, 3 drafts" in f for f in found)
     assert charts.chart_spec({"spec": doc}, theme.DARK) is not None

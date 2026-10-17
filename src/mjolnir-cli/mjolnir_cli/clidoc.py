@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 try:  # typer >= 0.20 vendors its own click
@@ -140,6 +141,14 @@ def reference(app) -> str:
                                                      for s in cmds if s.path.rsplit(" ", 1)[0] == c.path) + ".")  # fmt: skip
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def write_reference(root: Path, app) -> Path:
+    """Write :func:`reference` to ``<root>/docs/cli.md``; returns the path."""
+    path = root / "docs" / "cli.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(reference(app))
+    return path
 
 
 def block_commands(block: str) -> list[str]:

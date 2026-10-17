@@ -109,13 +109,13 @@ def test_spec_label_from_records_and_configs():
 
 
 def test_e2e_cells_are_colored_by_the_band():
-    from mjolnir_cli import readme
+    from mjolnir_cli.readme.fmt import ratio_pct
 
     assert e2e.E2E_NOISE_PCT == 3.0
-    assert "#16a34a" in readme.ratio_pct(3.5) and "+3.5" in readme.ratio_pct(3.5)
-    assert "grey" in readme.ratio_pct(2.9) and "grey" in readme.ratio_pct(-2.9)
-    assert "#dc2626" in readme.ratio_pct(-3.1) and "−3.1" in readme.ratio_pct(-3.1)
-    assert not any(ch in readme.ratio_pct(10) for ch in "✅🟰🔻")
+    assert "#16a34a" in ratio_pct(3.5) and "+3.5" in ratio_pct(3.5)
+    assert "grey" in ratio_pct(2.9) and "grey" in ratio_pct(-2.9)
+    assert "#dc2626" in ratio_pct(-3.1) and "−3.1" in ratio_pct(-3.1)
+    assert not any(ch in ratio_pct(10) for ch in "✅🟰🔻")
 
 
 def test_each_leg_stops_its_server(monkeypatch):

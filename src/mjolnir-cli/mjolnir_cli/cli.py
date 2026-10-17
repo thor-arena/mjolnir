@@ -55,7 +55,7 @@ from mjolnir_cli.config import (
     scan_all_configs,
     user_configs_dir,
 )
-from mjolnir_cli import benchy, cachectl, charts, dockerctl, litellm, perses, picker, readme, tasks, thor
+from mjolnir_cli import benchy, cachectl, charts, clidoc, dockerctl, litellm, perses, picker, readme, tasks, thor
 from mjolnir_cli.verify.cli import app as verify_app
 from mjolnir_cli.autoresearch import app as autoresearch_app
 
@@ -1384,8 +1384,7 @@ def plot(
         False,
         "--readme",
         help="also render README.md from the README.md.j2 template "
-        "(every table + number computed from the committed raw "
-        "data)",
+        "(every table + number computed from the committed raw data)",
     ),
     readme_template: Optional[Path] = typer.Option(
         None, "--readme-template", help="template override (default: <repo>/README.md.j2)"
@@ -1413,6 +1412,7 @@ def plot(
     if render_readme:
         try:
             readme.render_readme(layout, template=readme_template, out=readme_out)
+            print(f"[mjolnir] wrote {clidoc.write_reference(layout.repo_root, app)}")
         except (RuntimeError, FileNotFoundError, OSError) as e:
             typer.secho(str(e), fg=typer.colors.RED, err=True)
             raise typer.Exit(1)
