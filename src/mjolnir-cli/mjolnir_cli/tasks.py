@@ -91,7 +91,7 @@ def run_task(s: Settings, name: str, script_args: list[str], dry_run: bool = Fal
     return run_once(cmd, task_container(task))
 
 
-def _run_gate(s: Settings, script_args: list[str], dry_run: bool) -> int:
+def run_gate(s: Settings, script_args: list[str], dry_run: bool) -> int:
     """Run the clean-window gate on the host (no container)."""
     from mjolnir_cli.gate import wait_for_idle, server_load
     import time as _time

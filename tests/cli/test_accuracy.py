@@ -156,7 +156,7 @@ def test_baseline_is_per_model(tmp_path):
 def test_print_accuracy_compares_within_model(capsys):
     """The end-of-run table: a run with legs of two models never prints a delta
     across models."""
-    from mjolnir_cli import cli
+    from mjolnir_cli.commands import bench_report
 
     q36 = {"model": "nvidia/Qwen3.6-35B-A3B"}
     doc = {
@@ -168,7 +168,7 @@ def test_print_accuracy_compares_within_model(capsys):
             {**_leg(MJ, "NVFP4_MJOLNIR_E2M3", 90.0, 80.0, {}), **q36, "label": "q36 mjolnir"},
         ],
     }
-    cli._print_accuracy(doc)
+    bench_report.print_accuracy(doc)
     out = capsys.readouterr().out
     assert "(-1.0)" in out and "(+3.0)" in out  # vs the Qwen3.6 official leg
     assert "(-7.0)" not in out  # never vs Qwen3.8's NVFP4
@@ -306,10 +306,10 @@ def test_averaged_trials_rescale_every_trial():
 
 
 def test_print_accuracy_marks_an_excluded_scenario(capsys):
-    from mjolnir_cli import cli
+    from mjolnir_cli.commands import bench_report
 
     off, mj = _excluded_pair()
-    cli._print_accuracy({"run_id": "r", "args": ["run"], "legs": [off, mj]})
+    bench_report.print_accuracy({"run_id": "r", "args": ["run"], "legs": [off, mj]})
     out = capsys.readouterr().out
     assert "(-1.4‡)" in out and "(-0.1)" not in out
     assert "excluded points counting as zero" in out

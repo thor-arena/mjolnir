@@ -127,6 +127,6 @@ def test_progress_chart_renders(tmp_path):
          "reason": "geomean +0.0% ≤ +2% (set aside, reference jumped: 256K)", "hypothesis": "y"},
         {"id": 4, **_row({L: 1.06 for L in LS}), "status": "keep", "score": 1.06, "hypothesis": "z"},
     ]  # fmt: skip
-    p = ar._render_progress(tmp_path, rows, tmp_path / "progress.png")
+    p = ar.render_progress(tmp_path, rows, tmp_path / "progress.png")
     assert p and (tmp_path / "progress.png").exists() and (tmp_path / "progress-dark.png").exists()
-    assert ar._render_progress(tmp_path, [], tmp_path / "empty.png")  # the placeholder
+    assert ar.render_progress(tmp_path, [], tmp_path / "empty.png")  # the placeholder

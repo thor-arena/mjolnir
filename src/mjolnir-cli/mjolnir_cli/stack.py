@@ -22,7 +22,8 @@ What lives here (the part every stack would otherwise re-implement):
 
 Adding a new stack = ``docker/<name>/docker-compose.yaml`` (+ templates) + a
 thin ``src/mjolnir/<name>.py`` (a ``StackSpec`` + glue: what to render, the
-health URL, the banner) + a typer group in ``cli.py``.
+health URL, the banner) + a typer group in ``commands/<name>.py``, mounted in
+``cli.py``.
 """
 
 from __future__ import annotations

@@ -4,17 +4,24 @@ Read straight from the source with ``ast`` (every import counts, function-local
 ones included; only ``if TYPE_CHECKING:`` blocks are skipped, since a type-only
 import never runs):
 
-* the ``readme`` and ``charts`` packages are layered as ``ALLOWED`` declares,
-  and hold exactly the modules it declares: readme is fmt <- tables / findings
-  <- context / how <- ``__init__``; charts is ``_common`` <- one module per
-  chart family (kernel, e2e, hero, infographic, accuracy, autoresearch) <-
-  ``__init__``, so a family imports only ``_common`` from ``charts`` and only
-  ``__init__`` crosses families;
+* the ``readme``, ``charts`` and ``commands`` packages are layered as
+  ``ALLOWED`` declares, and hold exactly the modules it declares: readme is fmt
+  <- tables / findings <- context / how <- ``__init__``; charts is ``_common``
+  <- one module per chart family (kernel, e2e, hero, infographic, accuracy,
+  autoresearch) <- ``__init__``, so a family imports only ``_common`` from
+  ``charts`` and only ``__init__`` crosses families; commands is ``_common`` <-
+  ``bench_report`` (bench's result printing) <- one module per command group
+  or root-command topic, so a command module imports only ``_common`` from
+  ``commands`` (``bench`` also ``bench_report``), never another command module;
 * modules outside a ``FACADES`` package reach it only through its facade;
 * ``FORBIDDEN`` lists the packages that must not import each other: nothing in
   ``readme`` reaches up to ``charts``, ``cli`` or ``clidoc``, and ``charts``
   never imports ``readme`` (the labels both need live in ``mjolnir_cli.labels``,
   the verify data loader in ``verify.latest``), ``cli`` or ``clidoc``;
+* ``ONLY_IMPORTED_BY`` lists the modules only named importers may reach from
+  outside them: nothing but ``__main__`` imports ``cli`` (a composition root
+  over ``commands``), only ``cli`` imports ``commands`` from outside it, and
+  only ``commands.bench`` imports ``commands.bench_report``;
 * a name with a leading underscore stays inside its module: governed modules
   import none from elsewhere, and nobody imports one from a governed module.
 """
@@ -31,11 +38,14 @@ SRC = Path(__file__).resolve().parents[2] / "src" / "mjolnir-cli"
 PKG = "mjolnir_cli"
 README = "mjolnir_cli.readme"
 CHARTS = "mjolnir_cli.charts"
+CLI = "mjolnir_cli.cli"
+COMMANDS = "mjolnir_cli.commands"
 
 # Modules whose private names must not cross a module boundary, in either
-# direction. The file-length split (#33) adds each package here as it is
-# split: readme and charts so far; the cli commands come next.
-GOVERNED = {"mjolnir_cli.readme", "mjolnir_cli.labels", "mjolnir_cli.verify.latest", CHARTS}
+# direction. The file-length split (#33) added each package here as it was
+# split; all three are governed now: readme, charts, and the cli with its
+# commands package.
+GOVERNED = {"mjolnir_cli.readme", "mjolnir_cli.labels", "mjolnir_cli.verify.latest", CHARTS, CLI, COMMANDS}
 
 
 @dataclass(frozen=True)
@@ -124,9 +134,12 @@ def _in(module: str, root: str) -> bool:
 FMT, TABLES, FINDINGS = f"{README}.fmt", f"{README}.tables", f"{README}.findings"
 CHARTS_COMMON = f"{CHARTS}._common"
 CHART_FAMILIES = ("kernel", "e2e", "hero", "infographic", "accuracy", "autoresearch")
+COMMANDS_COMMON, BENCH_REPORT, BENCH = f"{COMMANDS}._common", f"{COMMANDS}.bench_report", f"{COMMANDS}.bench"
+# one module per command group (sub-app) or root-command topic
+COMMAND_TOPICS = ("serve", "model", "image", "litellm", "perses", "hw", "window", "calibrate", "results", "version")
 
 # The layered packages: each one's ``__init__`` may import any of its modules.
-LAYERED = (README, CHARTS)
+LAYERED = (README, CHARTS, COMMANDS)
 
 # module of a layered package -> the other modules of that package it may import
 ALLOWED = {
@@ -137,6 +150,10 @@ ALLOWED = {
     f"{README}.how": {FMT, TABLES, FINDINGS},
     CHARTS_COMMON: set(),
     **{f"{CHARTS}.{family}": {CHARTS_COMMON} for family in CHART_FAMILIES},
+    COMMANDS_COMMON: set(),
+    BENCH_REPORT: {COMMANDS_COMMON},
+    BENCH: {COMMANDS_COMMON, BENCH_REPORT},
+    **{f"{COMMANDS}.{topic}": {COMMANDS_COMMON} for topic in COMMAND_TOPICS},
 }
 
 # packages that modules outside them may import only through their facade
@@ -145,12 +162,19 @@ FACADES = (CHARTS,)
 # importer package -> the mjolnir_cli packages nothing in it may import
 FORBIDDEN = [
     (README, CHARTS),
-    (README, "mjolnir_cli.cli"),
+    (README, CLI),
     (README, "mjolnir_cli.clidoc"),
     (CHARTS, README),
-    (CHARTS, "mjolnir_cli.cli"),
+    (CHARTS, CLI),
     (CHARTS, "mjolnir_cli.clidoc"),
 ]
+
+# module or package -> the only modules outside it that may import it
+ONLY_IMPORTED_BY = {
+    CLI: {f"{PKG}.__main__"},
+    COMMANDS: {CLI},
+    BENCH_REPORT: {BENCH},
+}
 
 
 def test_walker_sees_function_local_and_attribute_uses_but_not_type_checking_blocks():
@@ -199,6 +223,19 @@ def test_package_never_imports_forbidden_package(graph, importer, target):
     mods = [m for m in graph if _in(m, importer)]
     assert mods and any(_in(m, target) for m in graph), (importer, target)
     bad = [(m, u.target, u.line) for m in mods for u in graph[m] if _in(u.target, target)]
+    assert bad == []
+
+
+@pytest.mark.parametrize("target", sorted(ONLY_IMPORTED_BY))
+def test_only_its_named_importers_import_a_module_from_outside_it(graph, target):
+    assert any(_in(m, target) for m in graph) and ONLY_IMPORTED_BY[target] <= set(graph), target
+    bad = [
+        (m, u.target, u.line)
+        for m in graph
+        if not _in(m, target) and m not in ONLY_IMPORTED_BY[target]
+        for u in graph[m]
+        if _in(u.target, target)
+    ]
     assert bad == []
 
 

@@ -119,14 +119,15 @@ def test_e2e_cells_are_colored_by_the_band():
 
 
 def test_each_leg_stops_its_server(monkeypatch):
-    from mjolnir_cli import benchy, cli, dockerctl
+    from mjolnir_cli import benchy, dockerctl
+    from mjolnir_cli.commands import _common, bench
 
     calls = []
     monkeypatch.setattr(dockerctl, "serve_down", lambda s, **kw: calls.append(("down", s.quant)))
     monkeypatch.setattr(dockerctl, "serve_up", lambda s, **kw: calls.append(("up", s.quant)))
     monkeypatch.setattr(benchy, "run_perf", lambda s, layout, **kw: calls.append(("bench", s.quant)))
-    s = cli._settings(None, None, None, None)
-    cli._run_legs(s, None, [(s.model, "a", "NVFP4", None), (s.model, "b", "NVFP4_MJOLNIR", None)])
+    s = _common.settings(None, None, None, None)
+    bench.run_legs(s, None, [(s.model, "a", "NVFP4", None), (s.model, "b", "NVFP4_MJOLNIR", None)])
     assert calls == [
         ("down", "NVFP4"),
         ("up", "NVFP4"),
@@ -147,7 +148,7 @@ def test_each_leg_stops_its_server(monkeypatch):
     import typer
 
     with pytest.raises(typer.Exit):
-        cli._run_legs(s, None, [(s.model, "a", "NVFP4", None)])
+        bench.run_legs(s, None, [(s.model, "a", "NVFP4", None)])
     assert calls[-1] == ("down", "NVFP4")  # stopped even when the bench fails
 
 
@@ -287,7 +288,7 @@ def test_pair_and_site_rows_never_mix_models(tmp_path):
 def test_compare_pairs_the_requested_models_runs(tmp_path, monkeypatch, capsys):
     """`bench compare --model` (and `bench e2e`, which passes its own model) show
     that model's pair, not the default model's."""
-    from mjolnir_cli import cli
+    from mjolnir_cli.commands import bench_report
 
     h = tmp_path / "history.jsonl"
     q36 = {"model": "nvidia/Qwen3.6-35B-A3B"}
@@ -299,7 +300,7 @@ def test_compare_pairs_the_requested_models_runs(tmp_path, monkeypatch, capsys):
     ]
     h.write_text("".join(json.dumps(r) + "\n" for r in rows))
     layout = type("L", (), {"history_file": h})()
-    assert cli._print_compare(layout, "NVFP4_MJOLNIR_E2M3", True, "NVFP4_DFLASH", q36["model"]) == 0
+    assert bench_report.print_compare(layout, "NVFP4_MJOLNIR_E2M3", True, "NVFP4_DFLASH", q36["model"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["cells"][0]["tg_tps"][:2] == [80.0, 130.0]  # Qwen3.6's pair, not Qwen3.8's 20 vs 30
     assert "NVFP4_DFLASH" in out["official"]

@@ -140,8 +140,12 @@ skipped with a hint — nothing blocks on a password.
   - `mjolnir/__init__.py` — `register()` (the plugin entry point), `BACKEND_NAME`.
 - `src/mjolnir-cli/` — **the CLI** (`mjolnir-cli`, import `mjolnir_cli`, command
   `mjolnir`; typer):
-  - `cli.py` (commands), `config.py` (defaults: `DEFAULT_QUANT`, `IMAGE_REPO`,
-    `VLLM_VERSION`, `BACKEND_LABELS`; `RepoLayout`; bundled resources),
+  - `cli.py` (the composition root: builds `app`, mounts the sub-apps,
+    registers the root commands), `commands/` (every command body: one
+    module per sub-app or root-command topic on a shared `_common.py`;
+    `bench_report.py` prints bench results; layering pinned by
+    `tests/cli/test_module_boundaries.py`), `config.py` (defaults:
+    `DEFAULT_QUANT`, `IMAGE_REPO`, `VLLM_VERSION`, `BACKEND_LABELS`; `RepoLayout`; bundled resources),
     `legs.py` (the default legs of every bench and verify stage — the one
     place to change what is measured),
     `dockerctl.py` (serve), `gate.py`, `cachectl.py`, `benchy.py` +
